@@ -232,10 +232,17 @@ def generate_id(prefix):
 def parse_excel(file):
     """Parse Excel file and return DataFrame"""
     try:
-        df = pd.read_excel(file)
+        # Try with openpyxl first
+        df = pd.read_excel(file, engine='openpyxl')
         return df, None
-    except Exception as e:
-        return None, str(e)
+    except Exception as e1:
+        try:
+            # Fallback without specifying engine
+            file.seek(0)  # Reset file pointer
+            df = pd.read_excel(file)
+            return df, None
+        except Exception as e2:
+            return None, str(e2)
 
 def parse_csv(file):
     """Parse CSV file and return DataFrame"""
@@ -263,8 +270,20 @@ def create_download_link(df, filename, file_format):
     """Create download link for various formats"""
     if file_format == 'excel':
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
+        try:
+            # Try xlsxwriter first (more reliable on cloud)
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Data')
+        except Exception:
+            # Fallback to openpyxl
+            try:
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+            except Exception:
+                # Final fallback - return CSV instead
+                csv = df.to_csv(index=False)
+                b64 = base64.b64encode(csv.encode()).decode()
+                return f'<a href="data:file/csv;base64,{b64}" download="{filename}.csv">📥 Download CSV (Excel unavailable)</a>'
         b64 = base64.b64encode(output.getvalue()).decode()
         return f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}.xlsx">📥 Download Excel</a>'
     
