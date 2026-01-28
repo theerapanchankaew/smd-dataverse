@@ -100,41 +100,87 @@ if menu == "Ecosystem Map":
 
     st.markdown("---")
 
-    # ECOSYSTEM VISUALIZATION (Using Graphviz for Python)
-    # This creates the diagram dynamically
-    import graphviz
+    # ECOSYSTEM VISUALIZATION (Using Plotly - no external dependencies)
+    # Node positions for the network diagram
+    node_x = [0, 0, 0, 0, 2, 4]  # MDS, SGS, BMS, IT, HUB, VALUE
+    node_y = [3, 2, 1, 0, 1.5, 1.5]
     
-    # Logic to colorize nodes if they have data
-    mds_color = "lightblue" if len(st.session_state.db_mds) > 0 else "white"
+    node_labels = [
+        f"MDS (Sensor)<br>{len(st.session_state.db_mds)} Leads",
+        f"SGS (Navigator)<br>{len(st.session_state.db_sgs)} Projects",
+        f"BMS (Governor)<br>{len(st.session_state.db_bms)} Docs",
+        "IT (Backbone)<br>Infrastructure",
+        "Central Hub<br>(Kafka)",
+        "Value<br>Creation"
+    ]
     
-    graph = graphviz.Digraph()
-    graph.attr(rankdir='LR', bgcolor='#0e1117')
+    node_colors = ['#06b6d4', '#f59e0b', '#10b981', '#8b5cf6', '#fbbf24', '#a78bfa']
+    node_sizes = [40, 40, 40, 40, 60, 50]
     
-    # Nodes
-    graph.attr('node', shape='box', style='filled', fontname='Helvetica', color='white')
+    # Edge connections (from_idx, to_idx)
+    edges = [(0, 4), (1, 4), (2, 4), (3, 4), (4, 5)]
+    edge_labels = ['JSON', 'SQL', 'Logs', 'Metrics', 'Insight']
     
-    graph.node('MDS', label=f'MDS (Sensor)\n{len(st.session_state.db_mds)} Leads', fillcolor='#06b6d4', fontcolor='white')
-    graph.node('SGS', label=f'SGS (Navigator)\n{len(st.session_state.db_sgs)} Projects', fillcolor='#f59e0b', fontcolor='black')
-    graph.node('BMS', label=f'BMS (Governor)\n{len(st.session_state.db_bms)} Docs', fillcolor='#10b981', fontcolor='white')
-    graph.node('IT', label='IT (Backbone)\nInfrastructure', fillcolor='#8b5cf6', fontcolor='white')
+    # Create edge traces
+    edge_traces = []
+    for i, (src, dst) in enumerate(edges):
+        edge_traces.append(go.Scatter(
+            x=[node_x[src], node_x[dst], None],
+            y=[node_y[src], node_y[dst], None],
+            mode='lines',
+            line=dict(width=2, color='#64748b', dash='dash' if i < 4 else 'solid'),
+            hoverinfo='none',
+            showlegend=False
+        ))
+        # Edge label
+        mid_x = (node_x[src] + node_x[dst]) / 2
+        mid_y = (node_y[src] + node_y[dst]) / 2
+        edge_traces.append(go.Scatter(
+            x=[mid_x], y=[mid_y],
+            mode='text',
+            text=[edge_labels[i]],
+            textfont=dict(size=10, color='#94a3b8'),
+            hoverinfo='none',
+            showlegend=False
+        ))
     
-    graph.attr('node', shape='circle', style='filled', width='1.5', fixedsize='true', fontsize='12')
-    graph.node('HUB', label='Central\nHub\n(Kafka)', fillcolor='#fbbf24', fontcolor='black', penwidth='3')
-
-    graph.attr('node', shape='doublecircle', fillcolor='white', fontcolor='black')
-    graph.node('VALUE', label='Value\nCreation', fillcolor='#a78bfa')
-
-    # Edges
-    graph.edge('MDS', 'HUB', color='white', style='dashed', label='JSON')
-    graph.edge('SGS', 'HUB', color='white', style='dashed', label='SQL')
-    graph.edge('BMS', 'HUB', color='white', style='dashed', label='Logs')
-    graph.edge('IT', 'HUB', color='white', style='dashed', label='Metrics')
-    graph.edge('HUB', 'VALUE', color='#fbbf24', penwidth='2', label='Insight')
+    # Create node trace
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        hoverinfo='text',
+        text=node_labels,
+        textposition='middle center',
+        textfont=dict(size=10, color='white'),
+        marker=dict(
+            size=node_sizes,
+            color=node_colors,
+            line=dict(width=2, color='white'),
+            symbol=['square', 'square', 'square', 'square', 'circle', 'circle']
+        ),
+        showlegend=False
+    )
+    
+    # Create figure
+    fig_network = go.Figure(data=edge_traces + [node_trace])
+    fig_network.update_layout(
+        plot_bgcolor='#0e1117',
+        paper_bgcolor='#0e1117',
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1, 5]),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.5, 3.5]),
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=350,
+        annotations=[
+            dict(x=0, y=3.4, text="<b>Input Nodes</b>", showarrow=False, font=dict(color='#94a3b8', size=12)),
+            dict(x=2, y=2.2, text="<b>Processing</b>", showarrow=False, font=dict(color='#fbbf24', size=12)),
+            dict(x=4, y=2.2, text="<b>Output</b>", showarrow=False, font=dict(color='#a78bfa', size=12)),
+        ]
+    )
 
     c_viz, c_log = st.columns([2, 1])
     
     with c_viz:
-        st.graphviz_chart(graph, use_container_width=True)
+        st.plotly_chart(fig_network, use_container_width=True)
     
     with c_log:
         st.subheader("📡 Live Ingestion Log")
