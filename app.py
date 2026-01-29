@@ -1,1593 +1,592 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import json
-import io
-import base64
-from datetime import datetime, timedelta
-import random
-import hashlib
+import sqlite3
+from pathlib import Path
+from datetime import datetime, date, timedelta
 
-# ============================================================
-# 1. PAGE CONFIGURATION
-# ============================================================
+# =========================================================
+# MASCI Intelligence Hub (MVP) - Clean Streamlit App
+# - SQLite embedded DB (good for PoC / demo on Streamlit Cloud)
+# - Physical tables: dim_* + fact_* (replace-table import via CSV)
+# - Executive View: 1-page dashboard (health, execution, risk, signals, actions)
+# =========================================================
+
 st.set_page_config(
-    page_title="SMD Dataverse Platform",
-    page_icon="🧊",
+    page_title="Intelligence Hub (MVP)",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ============================================================
-# 2. CUSTOM CSS STYLING
-# ============================================================
-st.markdown("""
-<style>
-    /* Main Theme */
-    .stApp {
-        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-    }
-    
-    /* Cards */
-    .metric-card {
-        background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
-        border: 1px solid #475569;
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-        margin-bottom: 1rem;
-    }
-    
-    .metric-card h3 {
-        color: #94a3b8;
-        font-size: 0.85rem;
-        margin-bottom: 0.5rem;
-    }
-    
-    .metric-card .value {
-        color: #f1f5f9;
-        font-size: 2rem;
-        font-weight: bold;
-    }
-    
-    /* Status Badges */
-    .badge {
-        padding: 0.25rem 0.75rem;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
-    .badge-success { background: #065f46; color: #6ee7b7; }
-    .badge-warning { background: #78350f; color: #fcd34d; }
-    .badge-danger { background: #7f1d1d; color: #fca5a5; }
-    .badge-info { background: #1e3a5f; color: #7dd3fc; }
-    
-    /* Data Table */
-    .dataframe { font-size: 0.85rem !important; }
-    
-    /* Tabs Styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #1e293b;
-        border-radius: 10px;
-        padding: 0.5rem;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        background-color: transparent;
-        border-radius: 8px;
-        color: #94a3b8;
-        padding: 0.5rem 1rem;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background-color: #3b82f6 !important;
-        color: white !important;
-    }
-    
-    /* Section Headers */
-    .section-header {
-        background: linear-gradient(90deg, #3b82f6, #8b5cf6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-size: 1.5rem;
-        font-weight: bold;
-        margin-bottom: 1rem;
-    }
-    
-    /* Upload Zone */
-    .upload-zone {
-        border: 2px dashed #475569;
-        border-radius: 12px;
-        padding: 2rem;
-        text-align: center;
-        background: rgba(30, 41, 59, 0.5);
-        transition: all 0.3s ease;
-    }
-    
-    .upload-zone:hover {
-        border-color: #3b82f6;
-        background: rgba(59, 130, 246, 0.1);
-    }
-    
-    /* Hide Streamlit Branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* Custom Scrollbar */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: #1e293b; }
-    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: #64748b; }
-</style>
-""", unsafe_allow_html=True)
+DB_PATH = Path("intelligence_hub.db")
 
-# ============================================================
-# 3. SESSION STATE INITIALIZATION
-# ============================================================
-def init_session_state():
-    """Initialize all session state variables"""
-    
-    # Master Data Tables
-    if 'master_data' not in st.session_state:
-        st.session_state.master_data = {
-            'customers': pd.DataFrame({
-                'id': ['CUS001', 'CUS002', 'CUS003'],
-                'name': ['Thai Rung Ruang Co.', 'ABC Logistics', 'Green Eco Ltd.'],
-                'type': ['Corporate', 'SME', 'Corporate'],
-                'industry': ['Manufacturing', 'Logistics', 'Energy'],
-                'status': ['Active', 'Active', 'Prospect'],
-                'created_at': [datetime.now() - timedelta(days=x) for x in [30, 20, 10]]
-            }),
-            'products': pd.DataFrame({
-                'id': ['PRD001', 'PRD002', 'PRD003'],
-                'name': ['SME Loan', 'Trade Finance', 'Green Bond'],
-                'category': ['Lending', 'Trade', 'Investment'],
-                'min_amount': [1000000, 5000000, 10000000],
-                'max_amount': [50000000, 100000000, 500000000],
-                'status': ['Active', 'Active', 'Active']
-            }),
-            'employees': pd.DataFrame({
-                'id': ['EMP001', 'EMP002', 'EMP003'],
-                'name': ['สมชาย ใจดี', 'สมหญิง รักงาน', 'สมศักดิ์ เก่งกาจ'],
-                'department': ['MDS', 'SGS', 'BMS'],
-                'position': ['Manager', 'Analyst', 'Director'],
-                'email': ['somchai@smd.com', 'somying@smd.com', 'somsak@smd.com']
-            }),
-            'projects': pd.DataFrame({
-                'id': ['PRJ001', 'PRJ002'],
-                'name': ['AI Grant Phase 1', 'ESG Training'],
-                'department': ['SGS', 'BMS'],
-                'budget': [100000000, 50000000],
-                'status': ['In Progress', 'Planning'],
-                'risk_level': ['High', 'Low']
-            })
-        }
-    
-    # Transaction Data (MDS, SGS, BMS, IT)
-    if 'transactions' not in st.session_state:
-        st.session_state.transactions = {
-            'mds': pd.DataFrame({
-                'id': ['MDS001', 'MDS002', 'MDS003'],
-                'timestamp': [datetime.now() - timedelta(hours=x) for x in [2, 5, 8]],
-                'customer_id': ['CUS001', 'CUS002', 'CUS003'],
-                'lead_name': ['Thai Rung Ruang', 'ABC Logistics', 'Green Eco'],
-                'source': ['SME Project', 'Website', 'Facebook'],
-                'value': [5000000, 2000000, 8000000],
-                'status': ['Hot', 'Warm', 'Cold'],
-                'assigned_to': ['EMP001', 'EMP001', 'EMP002']
-            }),
-            'sgs': pd.DataFrame({
-                'id': ['SGS001', 'SGS002'],
-                'timestamp': [datetime.now() - timedelta(days=x) for x in [1, 3]],
-                'project_id': ['PRJ001', 'PRJ002'],
-                'project_name': ['AI Grant Phase 1', 'ESG Training'],
-                'funding': [100, 50],
-                'risk': ['High', 'Low'],
-                'progress': [45, 20]
-            }),
-            'bms': pd.DataFrame({
-                'id': ['BMS001', 'BMS002'],
-                'timestamp': [datetime.now() - timedelta(days=x) for x in [0, 1]],
-                'topic': ['Q1 Budget Approval', 'Policy Update Review'],
-                'meeting_date': [datetime.now().date(), datetime.now().date() - timedelta(days=1)],
-                'status': ['Approved', 'Pending'],
-                'participants': [5, 8],
-                'resolution': ['Approved with conditions', 'Pending review']
-            }),
-            'it': pd.DataFrame({
-                'id': ['IT001', 'IT002', 'IT003'],
-                'timestamp': [datetime.now() - timedelta(hours=x) for x in [1, 3, 6]],
-                'server': ['Gateway A', 'Database B', 'API Server'],
-                'uptime': [99.9, 99.8, 99.95],
-                'status': ['Normal', 'Normal', 'Normal'],
-                'cpu_usage': [45, 62, 38],
-                'memory_usage': [68, 75, 52]
-            })
-        }
-    
-    # Uploaded Files History
-    if 'uploaded_files' not in st.session_state:
-        st.session_state.uploaded_files = []
-    
-    # Report Templates
-    if 'report_templates' not in st.session_state:
-        st.session_state.report_templates = [
-            {'id': 'RPT001', 'name': 'Daily Sales Report', 'type': 'MDS', 'format': 'Excel'},
-            {'id': 'RPT002', 'name': 'Risk Assessment Report', 'type': 'SGS', 'format': 'PDF'},
-            {'id': 'RPT003', 'name': 'Board Meeting Summary', 'type': 'BMS', 'format': 'Word'},
-        ]
+# -------------------------
+# DB helpers
+# -------------------------
+def get_conn() -> sqlite3.Connection:
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-init_session_state()
+def init_db() -> None:
+    conn = get_conn()
+    cur = conn.cursor()
 
-# ============================================================
-# 4. UTILITY FUNCTIONS
-# ============================================================
+    # Dimensions
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_date (
+        date_id INTEGER PRIMARY KEY,
+        date TEXT NOT NULL,
+        month INTEGER,
+        quarter INTEGER,
+        year INTEGER
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_strategy (
+        strategy_id TEXT PRIMARY KEY,
+        strategy_name TEXT NOT NULL,
+        strategy_owner TEXT,
+        strategy_level TEXT,
+        start_year INTEGER,
+        end_year INTEGER
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_kpi (
+        kpi_id TEXT PRIMARY KEY,
+        kpi_name TEXT NOT NULL,
+        kpi_definition TEXT,
+        calculation_logic TEXT,
+        kpi_owner TEXT,
+        refresh_frequency TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_person (
+        person_id TEXT PRIMARY KEY,
+        person_name TEXT NOT NULL,
+        role TEXT,
+        department TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_organization (
+        organization_id TEXT PRIMARY KEY,
+        organization_name TEXT NOT NULL,
+        org_type TEXT,
+        sector TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_risk_category (
+        risk_category_id TEXT PRIMARY KEY,
+        risk_category_name TEXT NOT NULL,
+        governance_area TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_source (
+        source_id TEXT PRIMARY KEY,
+        source_type TEXT,
+        source_name TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_topic (
+        topic_id TEXT PRIMARY KEY,
+        topic_name TEXT NOT NULL
+    )
+    """)
 
-def generate_id(prefix):
-    """Generate unique ID"""
-    return f"{prefix}{hashlib.md5(str(datetime.now()).encode()).hexdigest()[:6].upper()}"
+    # Facts
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_strategic_kpi (
+        kpi_fact_id TEXT PRIMARY KEY,
+        date_id INTEGER NOT NULL,
+        strategy_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        kpi_id TEXT NOT NULL,
+        actual_value REAL,
+        target_value REAL,
+        variance_value REAL,
+        kpi_status TEXT,
+        last_updated_ts TEXT,
+        FOREIGN KEY(date_id) REFERENCES dim_date(date_id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_strategy_project (
+        project_fact_id TEXT PRIMARY KEY,
+        strategy_id TEXT NOT NULL,
+        project_name TEXT NOT NULL,
+        owner_person_id TEXT,
+        start_date_id INTEGER,
+        end_date_id INTEGER,
+        progress_percent REAL,
+        budget_plan REAL,
+        budget_used REAL,
+        project_status TEXT,
+        risk_level TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_risk_event (
+        risk_event_id TEXT PRIMARY KEY,
+        date_id INTEGER NOT NULL,
+        organization_id TEXT NOT NULL,
+        risk_category_id TEXT NOT NULL,
+        risk_description TEXT,
+        likelihood_score REAL,
+        impact_score REAL,
+        risk_score REAL,
+        mitigation_plan TEXT,
+        mitigation_status TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_external_signal (
+        signal_id TEXT PRIMARY KEY,
+        date_id INTEGER NOT NULL,
+        source_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL,
+        signal_type TEXT,
+        relevance_score REAL,
+        sentiment_score REAL,
+        linked_strategy_id TEXT
+    )
+    """)
 
-def parse_excel(file):
-    """Parse Excel file and return DataFrame"""
+    conn.commit()
+    conn.close()
+
+def read_df(sql: str) -> pd.DataFrame:
+    conn = get_conn()
     try:
-        # Try with openpyxl first
-        df = pd.read_excel(file, engine='openpyxl')
-        return df, None
-    except Exception as e1:
-        try:
-            # Fallback without specifying engine
-            file.seek(0)  # Reset file pointer
-            df = pd.read_excel(file)
-            return df, None
-        except Exception as e2:
-            return None, str(e2)
+        df = pd.read_sql_query(sql, conn)
+    finally:
+        conn.close()
+    return df
 
-def parse_csv(file):
-    """Parse CSV file and return DataFrame"""
+def replace_table(table: str, df: pd.DataFrame) -> None:
+    conn = get_conn()
     try:
-        df = pd.read_csv(file)
-        return df, None
-    except Exception as e:
-        return None, str(e)
+        df.to_sql(table, conn, if_exists="replace", index=False)
+    finally:
+        conn.close()
 
-def parse_pdf(file):
-    """Parse PDF file - extract text (simplified)"""
-    try:
-        return {"status": "success", "message": "PDF uploaded successfully", "pages": "N/A"}, None
-    except Exception as e:
-        return None, str(e)
+def ensure_dim_date(start: date, end: date) -> None:
+    """Create dim_date rows for [start, end] inclusive. date_id = YYYYMMDD."""
+    conn = get_conn()
+    cur = conn.cursor()
+    d = start
+    while d <= end:
+        date_id = int(d.strftime("%Y%m%d"))
+        cur.execute("""
+            INSERT OR IGNORE INTO dim_date(date_id, date, month, quarter, year)
+            VALUES (?, ?, ?, ?, ?)
+        """, (date_id, d.isoformat(), d.month, (d.month - 1)//3 + 1, d.year))
+        d = d + timedelta(days=1)
+    conn.commit()
+    conn.close()
 
-def parse_word(file):
-    """Parse Word file - extract text (simplified)"""
-    try:
-        return {"status": "success", "message": "Word document uploaded successfully"}, None
-    except Exception as e:
-        return None, str(e)
+# -------------------------
+# Demo seed + templates
+# -------------------------
+TABLE_COLUMNS = {
+    "dim_strategy": ["strategy_id","strategy_name","strategy_owner","strategy_level","start_year","end_year"],
+    "dim_kpi": ["kpi_id","kpi_name","kpi_definition","calculation_logic","kpi_owner","refresh_frequency"],
+    "dim_person": ["person_id","person_name","role","department"],
+    "dim_organization": ["organization_id","organization_name","org_type","sector"],
+    "dim_risk_category": ["risk_category_id","risk_category_name","governance_area"],
+    "dim_source": ["source_id","source_type","source_name"],
+    "dim_topic": ["topic_id","topic_name"],
+    "fact_strategic_kpi": ["kpi_fact_id","date_id","strategy_id","organization_id","kpi_id","actual_value","target_value","variance_value","kpi_status","last_updated_ts"],
+    "fact_strategy_project": ["project_fact_id","strategy_id","project_name","owner_person_id","start_date_id","end_date_id","progress_percent","budget_plan","budget_used","project_status","risk_level"],
+    "fact_risk_event": ["risk_event_id","date_id","organization_id","risk_category_id","risk_description","likelihood_score","impact_score","risk_score","mitigation_plan","mitigation_status"],
+    "fact_external_signal": ["signal_id","date_id","source_id","topic_id","signal_type","relevance_score","sentiment_score","linked_strategy_id"],
+}
 
-def create_download_link(df, filename, file_format):
-    """Create download link for various formats"""
-    if file_format == 'excel':
-        output = io.BytesIO()
-        try:
-            # Try xlsxwriter first (more reliable on cloud)
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='Data')
-        except Exception:
-            # Fallback to openpyxl
-            try:
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False)
-            except Exception:
-                # Final fallback - return CSV instead
-                csv = df.to_csv(index=False)
-                b64 = base64.b64encode(csv.encode()).decode()
-                return f'<a href="data:file/csv;base64,{b64}" download="{filename}.csv">📥 Download CSV (Excel unavailable)</a>'
-        b64 = base64.b64encode(output.getvalue()).decode()
-        return f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}.xlsx">📥 Download Excel</a>'
-    
-    elif file_format == 'csv':
-        csv = df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()
-        return f'<a href="data:file/csv;base64,{b64}" download="{filename}.csv">📥 Download CSV</a>'
-    
-    elif file_format == 'json':
-        json_str = df.to_json(orient='records', date_format='iso')
-        b64 = base64.b64encode(json_str.encode()).decode()
-        return f'<a href="data:file/json;base64,{b64}" download="{filename}.json">📥 Download JSON</a>'
+def make_template_csv(table: str) -> bytes:
+    df = pd.DataFrame(columns=TABLE_COLUMNS[table])
+    return df.to_csv(index=False).encode("utf-8")
 
-def get_status_color(status):
-    """Get color based on status"""
-    colors = {
-        'Hot': '#ef4444', 'Warm': '#f59e0b', 'Cold': '#3b82f6',
-        'High': '#ef4444', 'Medium': '#f59e0b', 'Low': '#22c55e',
-        'Active': '#22c55e', 'Inactive': '#6b7280', 'Prospect': '#8b5cf6',
-        'Approved': '#22c55e', 'Pending': '#f59e0b', 'Rejected': '#ef4444',
-        'Normal': '#22c55e', 'Warning': '#f59e0b', 'Critical': '#ef4444',
-        'In Progress': '#3b82f6', 'Planning': '#8b5cf6', 'Completed': '#22c55e'
-    }
-    return colors.get(status, '#6b7280')
+def seed_demo_data() -> None:
+    today = date.today()
+    ensure_dim_date(today - timedelta(days=120), today)
 
-# ============================================================
-# 5. SIDEBAR
-# ============================================================
+    dim_strategy = pd.DataFrame([
+        {"strategy_id":"S1","strategy_name":"ยกระดับคุณภาพบริการรับรอง","strategy_owner":"Director","strategy_level":"องค์กร","start_year":2026,"end_year":2028},
+        {"strategy_id":"S2","strategy_name":"Digital Transformation","strategy_owner":"Director","strategy_level":"องค์กร","start_year":2026,"end_year":2028},
+        {"strategy_id":"S3","strategy_name":"การบริหารความเสี่ยง/ธรรมาภิบาล","strategy_owner":"Director","strategy_level":"องค์กร","start_year":2026,"end_year":2028},
+    ])
+    dim_kpi = pd.DataFrame([
+        {"kpi_id":"K1","kpi_name":"On-time Delivery","kpi_definition":"งานส่งมอบตามกำหนด","calculation_logic":"on_time/total","kpi_owner":"Strategy","refresh_frequency":"Weekly"},
+        {"kpi_id":"K2","kpi_name":"Customer Satisfaction","kpi_definition":"ความพึงพอใจลูกค้า","calculation_logic":"avg_score","kpi_owner":"Strategy","refresh_frequency":"Monthly"},
+        {"kpi_id":"K3","kpi_name":"Compliance Findings","kpi_definition":"ประเด็นไม่สอดคล้อง","calculation_logic":"count(findings)","kpi_owner":"Governance","refresh_frequency":"Monthly"},
+        {"kpi_id":"K4","kpi_name":"Digital Project Progress","kpi_definition":"ความคืบหน้าโครงการดิจิทัล","calculation_logic":"avg(progress)","kpi_owner":"IT/Strategy","refresh_frequency":"Weekly"},
+        {"kpi_id":"K5","kpi_name":"Revenue Pipeline","kpi_definition":"แนวโน้มรายได้","calculation_logic":"sum(pipeline)","kpi_owner":"Finance","refresh_frequency":"Weekly"},
+    ])
+    dim_org = pd.DataFrame([
+        {"organization_id":"ORG1","organization_name":"MASCI (HQ)","org_type":"Foundation","sector":"Certification"},
+    ])
+    dim_person = pd.DataFrame([
+        {"person_id":"P1","person_name":"Owner A","role":"Project Owner","department":"Strategy"},
+        {"person_id":"P2","person_name":"Owner B","role":"Project Owner","department":"IT"},
+    ])
+    dim_risk_cat = pd.DataFrame([
+        {"risk_category_id":"R1","risk_category_name":"Operational","governance_area":"Operations"},
+        {"risk_category_id":"R2","risk_category_name":"Compliance","governance_area":"Governance"},
+        {"risk_category_id":"R3","risk_category_name":"Strategic","governance_area":"Strategy"},
+    ])
+    dim_source = pd.DataFrame([
+        {"source_id":"SRC1","source_type":"External","source_name":"Regulator"},
+        {"source_id":"SRC2","source_type":"External","source_name":"Market"},
+    ])
+    dim_topic = pd.DataFrame([
+        {"topic_id":"T1","topic_name":"Regulation"},
+        {"topic_id":"T2","topic_name":"Market Trend"},
+        {"topic_id":"T3","topic_name":"Technology"},
+    ])
+
+    replace_table("dim_strategy", dim_strategy)
+    replace_table("dim_kpi", dim_kpi)
+    replace_table("dim_organization", dim_org)
+    replace_table("dim_person", dim_person)
+    replace_table("dim_risk_category", dim_risk_cat)
+    replace_table("dim_source", dim_source)
+    replace_table("dim_topic", dim_topic)
+
+    d0 = int(today.strftime("%Y%m%d"))
+    d1 = int((today - timedelta(days=30)).strftime("%Y%m%d"))
+
+    fact_kpi = pd.DataFrame([
+        {"kpi_fact_id":"F_KPI_1","date_id":d0,"strategy_id":"S1","organization_id":"ORG1","kpi_id":"K1","actual_value":0.91,"target_value":0.95,"variance_value":-0.04,"kpi_status":"Amber","last_updated_ts":datetime.now().isoformat()},
+        {"kpi_fact_id":"F_KPI_2","date_id":d0,"strategy_id":"S1","organization_id":"ORG1","kpi_id":"K2","actual_value":4.2,"target_value":4.5,"variance_value":-0.3,"kpi_status":"Amber","last_updated_ts":datetime.now().isoformat()},
+        {"kpi_fact_id":"F_KPI_3","date_id":d0,"strategy_id":"S3","organization_id":"ORG1","kpi_id":"K3","actual_value":12,"target_value":8,"variance_value":4,"kpi_status":"Red","last_updated_ts":datetime.now().isoformat()},
+        {"kpi_fact_id":"F_KPI_4","date_id":d0,"strategy_id":"S2","organization_id":"ORG1","kpi_id":"K4","actual_value":0.55,"target_value":0.60,"variance_value":-0.05,"kpi_status":"Amber","last_updated_ts":datetime.now().isoformat()},
+        {"kpi_fact_id":"F_KPI_5","date_id":d0,"strategy_id":"S1","organization_id":"ORG1","kpi_id":"K5","actual_value":32.0,"target_value":30.0,"variance_value":2.0,"kpi_status":"Green","last_updated_ts":datetime.now().isoformat()},
+    ])
+    replace_table("fact_strategic_kpi", fact_kpi)
+
+    fact_proj = pd.DataFrame([
+        {"project_fact_id":"PRJ_1","strategy_id":"S2","project_name":"Data Catalog & KPI Dictionary","owner_person_id":"P1","start_date_id":d1,"end_date_id":d0,"progress_percent":65,"budget_plan":800000,"budget_used":520000,"project_status":"In Progress","risk_level":"Medium"},
+        {"project_fact_id":"PRJ_2","strategy_id":"S2","project_name":"Executive Dashboard v1","owner_person_id":"P2","start_date_id":d1,"end_date_id":d0,"progress_percent":45,"budget_plan":600000,"budget_used":300000,"project_status":"In Progress","risk_level":"High"},
+    ])
+    replace_table("fact_strategy_project", fact_proj)
+
+    fact_risk = pd.DataFrame([
+        {"risk_event_id":"RSK_1","date_id":d0,"organization_id":"ORG1","risk_category_id":"R2","risk_description":"เอกสารหลักฐานไม่ครบตามรอบ","likelihood_score":4,"impact_score":4,"risk_score":16,"mitigation_plan":"ทำ checklist + training","mitigation_status":"Open"},
+        {"risk_event_id":"RSK_2","date_id":d0,"organization_id":"ORG1","risk_category_id":"R1","risk_description":"ทรัพยากรผู้ตรวจไม่พอใน peak season","likelihood_score":3,"impact_score":5,"risk_score":15,"mitigation_plan":"ปรับแผน capacity","mitigation_status":"In Progress"},
+        {"risk_event_id":"RSK_3","date_id":d0,"organization_id":"ORG1","risk_category_id":"R3","risk_description":"การเปลี่ยนแปลงข้อกำหนดภายนอกกระทบ scope","likelihood_score":3,"impact_score":4,"risk_score":12,"mitigation_plan":"ติดตามประกาศ + gap review","mitigation_status":"Open"},
+    ])
+    replace_table("fact_risk_event", fact_risk)
+
+    fact_signal = pd.DataFrame([
+        {"signal_id":"SIG_1","date_id":d0,"source_id":"SRC1","topic_id":"T1","signal_type":"Risk","relevance_score":0.9,"sentiment_score":-0.4,"linked_strategy_id":"S3"},
+        {"signal_id":"SIG_2","date_id":d0,"source_id":"SRC2","topic_id":"T2","signal_type":"Opportunity","relevance_score":0.7,"sentiment_score":0.2,"linked_strategy_id":"S1"},
+        {"signal_id":"SIG_3","date_id":d0,"source_id":"SRC2","topic_id":"T3","signal_type":"Opportunity","relevance_score":0.8,"sentiment_score":0.4,"linked_strategy_id":"S2"},
+    ])
+    replace_table("fact_external_signal", fact_signal)
+
+# -------------------------
+# Load for Executive View
+# -------------------------
+def load_exec_data(as_of_id: int, org_id: str):
+    kpi = read_df(f"""
+        SELECT f.*, k.kpi_name, s.strategy_name
+        FROM fact_strategic_kpi f
+        LEFT JOIN dim_kpi k ON f.kpi_id = k.kpi_id
+        LEFT JOIN dim_strategy s ON f.strategy_id = s.strategy_id
+        WHERE f.date_id = {as_of_id}
+          AND f.organization_id = '{org_id}'
+    """)
+    projects = read_df("""
+        SELECT p.*, s.strategy_name, per.person_name
+        FROM fact_strategy_project p
+        LEFT JOIN dim_strategy s ON p.strategy_id = s.strategy_id
+        LEFT JOIN dim_person per ON p.owner_person_id = per.person_id
+    """)
+    risks = read_df(f"""
+        SELECT r.*, c.risk_category_name
+        FROM fact_risk_event r
+        LEFT JOIN dim_risk_category c ON r.risk_category_id = c.risk_category_id
+        WHERE r.date_id = {as_of_id}
+          AND r.organization_id = '{org_id}'
+    """)
+    signals = read_df(f"""
+        SELECT e.*, src.source_name, t.topic_name, s.strategy_name
+        FROM fact_external_signal e
+        LEFT JOIN dim_source src ON e.source_id = src.source_id
+        LEFT JOIN dim_topic t ON e.topic_id = t.topic_id
+        LEFT JOIN dim_strategy s ON e.linked_strategy_id = s.strategy_id
+        WHERE e.date_id = {as_of_id}
+    """)
+    return kpi, projects, risks, signals
+
+# -------------------------
+# App
+# -------------------------
+init_db()
 
 with st.sidebar:
-    st.markdown("""
-    <div style="text-align: center; padding: 1rem 0;">
-        <div style="font-size: 3rem;">🧊</div>
-        <h1 style="margin: 0; font-size: 1.5rem; background: linear-gradient(90deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">SMD Dataverse</h1>
-        <p style="color: #64748b; font-size: 0.8rem; margin: 0;">Enterprise Data Platform v5.0</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # System Status
-    st.markdown("### 📊 System Status")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Uptime", "99.9%", "0.1%")
-    with col2:
-        st.metric("Active Users", "24", "3")
-    
-    st.markdown("---")
-    
-    # Quick Stats
-    st.markdown("### 📈 Quick Stats")
-    st.markdown(f"""
-    - **MDS Records:** {len(st.session_state.transactions['mds'])}
-    - **SGS Projects:** {len(st.session_state.transactions['sgs'])}
-    - **BMS Documents:** {len(st.session_state.transactions['bms'])}
-    - **IT Systems:** {len(st.session_state.transactions['it'])}
-    """)
-    
-    st.markdown("---")
-    
-    # Current Time
-    st.markdown(f"**🕐 Server Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.title("🧠 Intelligence Hub")
+    st.caption("MVP (Clean) • Strategy • Risk • Signals")
+    st.divider()
 
-# ============================================================
-# 6. MAIN CONTENT - TAB NAVIGATION
-# ============================================================
+    page = st.radio("เมนู", ["Executive View", "Data Import", "Schema / Templates"], index=0)
 
-# Main Tabs
-tabs = st.tabs([
-    "🏠 Dashboard",
-    "📥 Data Import",
-    "📊 Master Data",
-    "💼 MDS (Marketing)",
-    "🧭 SGS (Strategy)",
-    "⚖️ BMS (Governance)",
-    "🖥️ IT (Operations)",
-    "📝 Report Generator",
-    "⚙️ Settings"
-])
+    st.divider()
+    st.markdown("### As-of & Filters")
+    as_of_txt = st.text_input("As-of date_id (YYYYMMDD)", value=date.today().strftime("%Y%m%d"))
+    org_id = st.text_input("organization_id", value="ORG1")
 
-# ============================================================
-# TAB 1: DASHBOARD
-# ============================================================
-with tabs[0]:
-    st.markdown('<p class="section-header">📊 Executive Dashboard</p>', unsafe_allow_html=True)
-    
-    # Key Metrics Row
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        total_leads = len(st.session_state.transactions['mds'])
-        hot_leads = len(st.session_state.transactions['mds'][st.session_state.transactions['mds']['status'] == 'Hot'])
-        st.metric("Total Leads", total_leads, f"{hot_leads} Hot")
-    
-    with col2:
-        total_value = st.session_state.transactions['mds']['value'].sum()
-        st.metric("Pipeline Value", f"฿{total_value:,.0f}", "↑ 12%")
-    
-    with col3:
-        total_projects = len(st.session_state.transactions['sgs'])
-        st.metric("Active Projects", total_projects, "2 High Risk")
-    
-    with col4:
-        avg_uptime = st.session_state.transactions['it']['uptime'].mean()
-        st.metric("System Uptime", f"{avg_uptime:.2f}%", "Stable")
-    
-    st.markdown("---")
-    
-    # Charts Row
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### 📈 Lead Funnel Analysis")
-        mds_df = st.session_state.transactions['mds']
-        funnel_data = mds_df['status'].value_counts().reset_index()
-        funnel_data.columns = ['Status', 'Count']
-        
-        fig_funnel = px.funnel(
-            funnel_data, x='Count', y='Status',
-            color='Status',
-            color_discrete_map={'Hot': '#ef4444', 'Warm': '#f59e0b', 'Cold': '#3b82f6'}
-        )
-        fig_funnel.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font_color='#94a3b8',
-            showlegend=False,
-            height=300
-        )
-        st.plotly_chart(fig_funnel, use_container_width=True)
-    
-    with col2:
-        st.markdown("#### 🎯 Risk Distribution")
-        sgs_df = st.session_state.transactions['sgs']
-        risk_data = sgs_df['risk'].value_counts().reset_index()
-        risk_data.columns = ['Risk Level', 'Count']
-        
-        fig_pie = px.pie(
-            risk_data, values='Count', names='Risk Level',
-            color='Risk Level',
-            color_discrete_map={'High': '#ef4444', 'Medium': '#f59e0b', 'Low': '#22c55e'}
-        )
-        fig_pie.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font_color='#94a3b8',
-            height=300
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-    
-    # Ecosystem Visualization
-    st.markdown("---")
-    st.markdown("#### 🌐 Ecosystem Data Flow")
-    
-    # Network Diagram using Plotly
-    node_x = [0, 0, 0, 0, 2, 4]
-    node_y = [3, 2, 1, 0, 1.5, 1.5]
-    
-    node_labels = [
-        f"MDS<br>{len(st.session_state.transactions['mds'])} Records",
-        f"SGS<br>{len(st.session_state.transactions['sgs'])} Projects",
-        f"BMS<br>{len(st.session_state.transactions['bms'])} Docs",
-        f"IT<br>{len(st.session_state.transactions['it'])} Systems",
-        "Central<br>Hub",
-        "Value<br>Creation"
-    ]
-    
-    node_colors = ['#06b6d4', '#f59e0b', '#10b981', '#8b5cf6', '#fbbf24', '#a78bfa']
-    
-    # Create edges
-    edge_traces = []
-    edges = [(0, 4), (1, 4), (2, 4), (3, 4), (4, 5)]
-    
-    for src, dst in edges:
-        edge_traces.append(go.Scatter(
-            x=[node_x[src], node_x[dst]], y=[node_y[src], node_y[dst]],
-            mode='lines',
-            line=dict(width=2, color='#475569', dash='dash'),
-            hoverinfo='none',
-            showlegend=False
-        ))
-    
-    # Create nodes
-    node_trace = go.Scatter(
-        x=node_x, y=node_y,
-        mode='markers+text',
-        text=node_labels,
-        textposition='middle center',
-        textfont=dict(size=10, color='white'),
-        marker=dict(size=[50, 50, 50, 50, 70, 60], color=node_colors, line=dict(width=2, color='white')),
-        hoverinfo='text',
-        showlegend=False
-    )
-    
-    fig_network = go.Figure(data=edge_traces + [node_trace])
-    fig_network.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1, 5]),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.5, 3.5]),
-        height=350,
-        margin=dict(l=20, r=20, t=20, b=20)
-    )
-    st.plotly_chart(fig_network, use_container_width=True)
+    try:
+        as_of_id = int(as_of_txt)
+    except:
+        as_of_id = int(date.today().strftime("%Y%m%d"))
 
-# ============================================================
-# TAB 2: DATA IMPORT
-# ============================================================
-with tabs[1]:
-    st.markdown('<p class="section-header">📥 Data Import Center</p>', unsafe_allow_html=True)
-    
-    import_tabs = st.tabs(["📊 Excel/CSV", "📄 PDF", "📝 Word", "🔗 API Import", "📜 Import History"])
-    
-    # Excel/CSV Import
-    with import_tabs[0]:
-        st.markdown("### Import from Excel or CSV")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            uploaded_file = st.file_uploader(
-                "Choose Excel or CSV file",
-                type=['xlsx', 'xls', 'csv'],
-                key='excel_uploader'
-            )
-            
-            if uploaded_file:
-                st.success(f"📁 File uploaded: {uploaded_file.name}")
-                
-                # Parse file
-                if uploaded_file.name.endswith('.csv'):
-                    df, error = parse_csv(uploaded_file)
-                else:
-                    df, error = parse_excel(uploaded_file)
-                
-                if error:
-                    st.error(f"Error parsing file: {error}")
-                else:
-                    st.markdown("#### Preview Data")
-                    st.dataframe(df.head(10), use_container_width=True)
-                    
-                    st.markdown(f"**Total Rows:** {len(df)} | **Columns:** {len(df.columns)}")
-                    
-                    # Target Selection
-                    st.markdown("---")
-                    col_a, col_b = st.columns(2)
-                    
-                    with col_a:
-                        target_table = st.selectbox(
-                            "Import to Master Data Table",
-                            ['customers', 'products', 'employees', 'projects']
-                        )
-                    
-                    with col_b:
-                        import_mode = st.radio(
-                            "Import Mode",
-                            ['Append', 'Replace'],
-                            horizontal=True
-                        )
-                    
-                    if st.button("🚀 Import Data", type="primary"):
-                        # Add to session state
-                        if import_mode == 'Append':
-                            st.session_state.master_data[target_table] = pd.concat([
-                                st.session_state.master_data[target_table], df
-                            ], ignore_index=True)
-                        else:
-                            st.session_state.master_data[target_table] = df
-                        
-                        # Log upload
-                        st.session_state.uploaded_files.append({
-                            'filename': uploaded_file.name,
-                            'type': 'Excel/CSV',
-                            'target': target_table,
-                            'rows': len(df),
-                            'timestamp': datetime.now()
-                        })
-                        
-                        st.success(f"✅ Successfully imported {len(df)} rows to {target_table}!")
-                        st.balloons()
-        
-        with col2:
-            st.markdown("### 📋 Import Guidelines")
-            st.info("""
-            **Supported Formats:**
-            - Excel (.xlsx, .xls)
-            - CSV (.csv)
-            
-            **Best Practices:**
-            - Ensure headers in first row
-            - Remove empty rows
-            - Use consistent date formats
-            - Check for duplicate IDs
-            """)
-            
-            # Download Template
-            st.markdown("### 📥 Download Templates")
-            template_type = st.selectbox("Select Template", ['customers', 'products', 'employees', 'projects'])
-            
-            if st.button("Download Template"):
-                template_df = st.session_state.master_data[template_type].head(0)
-                st.markdown(create_download_link(template_df, f'{template_type}_template', 'excel'), unsafe_allow_html=True)
-    
-    # PDF Import
-    with import_tabs[1]:
-        st.markdown("### Import from PDF")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            pdf_file = st.file_uploader(
-                "Upload PDF Document",
-                type=['pdf'],
-                key='pdf_uploader'
-            )
-            
-            if pdf_file:
-                st.success(f"📁 PDF uploaded: {pdf_file.name}")
-                
-                result, error = parse_pdf(pdf_file)
-                
-                if error:
-                    st.error(f"Error: {error}")
-                else:
-                    st.info("ℹ️ PDF parsing requires additional libraries (PyPDF2/pdfplumber). For demo, showing placeholder.")
-                    
-                    # Simulated extraction
-                    st.markdown("#### Extracted Content Preview")
-                    st.text_area("Content", "PDF content would be extracted here...", height=200)
-                    
-                    target_module = st.selectbox(
-                        "Link to Module",
-                        ['MDS - Marketing', 'SGS - Strategy', 'BMS - Governance', 'IT - Operations']
-                    )
-                    
-                    if st.button("📎 Attach to Module", key='pdf_attach'):
-                        st.session_state.uploaded_files.append({
-                            'filename': pdf_file.name,
-                            'type': 'PDF',
-                            'target': target_module,
-                            'rows': 'Document',
-                            'timestamp': datetime.now()
-                        })
-                        st.success("✅ PDF attached successfully!")
-        
-        with col2:
-            st.markdown("### 📋 PDF Processing")
-            st.info("""
-            **Capabilities:**
-            - Text extraction
-            - Table detection
-            - Form field reading
-            - Image extraction
-            
-            **Use Cases:**
-            - Contract analysis
-            - Report digitization
-            - Document archival
-            """)
-    
-    # Word Import
-    with import_tabs[2]:
-        st.markdown("### Import from Word Document")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            word_file = st.file_uploader(
-                "Upload Word Document",
-                type=['docx', 'doc'],
-                key='word_uploader'
-            )
-            
-            if word_file:
-                st.success(f"📁 Word document uploaded: {word_file.name}")
-                
-                result, error = parse_word(word_file)
-                
-                if error:
-                    st.error(f"Error: {error}")
-                else:
-                    st.info("ℹ️ Word parsing requires python-docx library. For demo, showing placeholder.")
-                    
-                    st.markdown("#### Document Content Preview")
-                    st.text_area("Content", "Word document content would be extracted here...", height=200)
-                    
-                    doc_type = st.selectbox(
-                        "Document Type",
-                        ['Meeting Minutes', 'Policy Document', 'Report', 'Contract', 'Other']
-                    )
-                    
-                    if st.button("📎 Process Document", key='word_attach'):
-                        st.session_state.uploaded_files.append({
-                            'filename': word_file.name,
-                            'type': 'Word',
-                            'target': doc_type,
-                            'rows': 'Document',
-                            'timestamp': datetime.now()
-                        })
-                        st.success("✅ Document processed successfully!")
-        
-        with col2:
-            st.markdown("### 📋 Word Processing")
-            st.info("""
-            **Capabilities:**
-            - Full text extraction
-            - Table parsing
-            - Style detection
-            - Metadata reading
-            
-            **Auto-Classification:**
-            - Meeting minutes → BMS
-            - Strategy docs → SGS
-            - Marketing content → MDS
-            """)
-    
-    # API Import
-    with import_tabs[3]:
-        st.markdown("### API Integration")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### Configure API Endpoint")
-            api_url = st.text_input("API URL", placeholder="https://api.example.com/data")
-            api_method = st.selectbox("Method", ['GET', 'POST'])
-            api_headers = st.text_area("Headers (JSON)", '{"Authorization": "Bearer YOUR_TOKEN"}')
-            
-            if api_method == 'POST':
-                api_body = st.text_area("Request Body (JSON)", '{}')
-            
-            if st.button("🔗 Connect & Fetch", type="primary"):
-                st.info("API integration would fetch data here. Demo mode active.")
-                
-        with col2:
-            st.markdown("#### Pre-configured Integrations")
-            integrations = [
-                {'name': 'CRM System', 'status': 'Connected', 'last_sync': '2 hours ago'},
-                {'name': 'ERP System', 'status': 'Connected', 'last_sync': '1 hour ago'},
-                {'name': 'HR System', 'status': 'Disconnected', 'last_sync': 'N/A'},
-            ]
-            
-            for intg in integrations:
-                status_color = '#22c55e' if intg['status'] == 'Connected' else '#ef4444'
-                st.markdown(f"""
-                <div style="background: #1e293b; padding: 1rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid {status_color};">
-                    <strong>{intg['name']}</strong><br>
-                    <small style="color: #64748b;">Status: {intg['status']} | Last sync: {intg['last_sync']}</small>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # Import History
-    with import_tabs[4]:
-        st.markdown("### 📜 Import History")
-        
-        if st.session_state.uploaded_files:
-            history_df = pd.DataFrame(st.session_state.uploaded_files)
-            history_df['timestamp'] = pd.to_datetime(history_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-            st.dataframe(history_df, use_container_width=True)
-            
-            if st.button("🗑️ Clear History"):
-                st.session_state.uploaded_files = []
-                st.rerun()
+# =========================
+# Page: Executive View
+# =========================
+if page == "Executive View":
+    st.markdown("## 📌 Executive View (1 หน้า)")
+    st.caption("เปิดแล้วต้องรู้: สุขภาพองค์กร / ความคืบหน้า / ความเสี่ยง / สัญญาณภายนอก / สิ่งที่ต้องตัดสินใจ")
+
+    kpi, projects, risks, signals = load_exec_data(as_of_id, org_id)
+
+    top = st.columns([1,1,1,1,1])
+    with top[0]:
+        if st.button("🌱 Seed Demo Data"):
+            seed_demo_data()
+            st.success("Seed demo data เรียบร้อย")
+            st.rerun()
+    with top[1]:
+        st.write("")
+    with top[2]:
+        st.write("")
+    with top[3]:
+        st.write("")
+    with top[4]:
+        st.write("")
+
+    # Health snapshot
+    c1, c2, c3, c4 = st.columns(4)
+    if not kpi.empty:
+        green = int((kpi["kpi_status"] == "Green").sum())
+        amber = int((kpi["kpi_status"] == "Amber").sum())
+        red = int((kpi["kpi_status"] == "Red").sum())
+        total = int(len(kpi))
+    else:
+        green = amber = red = total = 0
+
+    c1.metric("KPI (ทั้งหมด)", total)
+    c2.metric("Green", green)
+    c3.metric("Amber", amber)
+    c4.metric("Red", red)
+
+    colA, colB = st.columns([1.35, 1])
+    with colA:
+        st.markdown("### 1) KPI สำคัญ")
+        if kpi.empty:
+            st.info("ยังไม่มีข้อมูล fact_strategic_kpi → กด Seed Demo Data หรือ Import CSV")
         else:
-            st.info("No import history yet. Upload some files to see the history.")
-
-# ============================================================
-# TAB 3: MASTER DATA
-# ============================================================
-with tabs[2]:
-    st.markdown('<p class="section-header">📊 Master Data Management</p>', unsafe_allow_html=True)
-    
-    master_tabs = st.tabs(["👥 Customers", "📦 Products", "👔 Employees", "📋 Projects"])
-    
-    # Customers
-    with master_tabs[0]:
-        st.markdown("### 👥 Customer Master Data")
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            # Editable dataframe
-            edited_customers = st.data_editor(
-                st.session_state.master_data['customers'],
+            st.dataframe(
+                kpi[["kpi_name","strategy_name","actual_value","target_value","variance_value","kpi_status"]],
                 use_container_width=True,
-                num_rows="dynamic",
-                key="customers_editor"
+                hide_index=True
             )
-            st.session_state.master_data['customers'] = edited_customers
-        
-        with col2:
-            st.markdown("#### Quick Add")
-            with st.form("add_customer"):
-                new_name = st.text_input("Customer Name")
-                new_type = st.selectbox("Type", ['Corporate', 'SME', 'Individual'])
-                new_industry = st.text_input("Industry")
-                
-                if st.form_submit_button("➕ Add Customer"):
-                    new_row = pd.DataFrame({
-                        'id': [generate_id('CUS')],
-                        'name': [new_name],
-                        'type': [new_type],
-                        'industry': [new_industry],
-                        'status': ['Active'],
-                        'created_at': [datetime.now()]
-                    })
-                    st.session_state.master_data['customers'] = pd.concat([
-                        st.session_state.master_data['customers'], new_row
-                    ], ignore_index=True)
-                    st.success("Customer added!")
-                    st.rerun()
-            
-            # Export
-            st.markdown("#### Export")
-            export_format = st.selectbox("Format", ['Excel', 'CSV', 'JSON'], key='cust_export')
-            if st.button("📥 Export Customers"):
-                df = st.session_state.master_data['customers']
-                if export_format == 'Excel':
-                    st.markdown(create_download_link(df, 'customers', 'excel'), unsafe_allow_html=True)
-                elif export_format == 'CSV':
-                    st.markdown(create_download_link(df, 'customers', 'csv'), unsafe_allow_html=True)
-                else:
-                    st.markdown(create_download_link(df, 'customers', 'json'), unsafe_allow_html=True)
-    
-    # Products
-    with master_tabs[1]:
-        st.markdown("### 📦 Product Master Data")
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            edited_products = st.data_editor(
-                st.session_state.master_data['products'],
+    with colB:
+        st.markdown("### KPI Status Distribution")
+        if total > 0:
+            fig = px.pie(
+                pd.DataFrame({"status":["Green","Amber","Red"], "count":[green, amber, red]}),
+                values="count",
+                names="status",
+            )
+            fig.update_layout(height=300, margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # Execution
+    st.markdown("### 2) Strategy Execution Status")
+    left, right = st.columns([1.2, 1])
+    with left:
+        if projects.empty:
+            st.info("ยังไม่มีข้อมูล fact_strategy_project")
+        else:
+            st.dataframe(
+                projects[["project_name","strategy_name","person_name","progress_percent","project_status","risk_level","budget_plan","budget_used"]],
                 use_container_width=True,
-                num_rows="dynamic",
-                key="products_editor"
+                hide_index=True
             )
-            st.session_state.master_data['products'] = edited_products
-        
-        with col2:
-            st.markdown("#### Quick Add")
-            with st.form("add_product"):
-                prod_name = st.text_input("Product Name")
-                prod_cat = st.selectbox("Category", ['Lending', 'Trade', 'Investment', 'Insurance'])
-                prod_min = st.number_input("Min Amount", value=1000000)
-                prod_max = st.number_input("Max Amount", value=50000000)
-                
-                if st.form_submit_button("➕ Add Product"):
-                    new_row = pd.DataFrame({
-                        'id': [generate_id('PRD')],
-                        'name': [prod_name],
-                        'category': [prod_cat],
-                        'min_amount': [prod_min],
-                        'max_amount': [prod_max],
-                        'status': ['Active']
-                    })
-                    st.session_state.master_data['products'] = pd.concat([
-                        st.session_state.master_data['products'], new_row
-                    ], ignore_index=True)
-                    st.success("Product added!")
-                    st.rerun()
-    
-    # Employees
-    with master_tabs[2]:
-        st.markdown("### 👔 Employee Master Data")
-        
-        edited_employees = st.data_editor(
-            st.session_state.master_data['employees'],
-            use_container_width=True,
-            num_rows="dynamic",
-            key="employees_editor"
-        )
-        st.session_state.master_data['employees'] = edited_employees
-    
-    # Projects
-    with master_tabs[3]:
-        st.markdown("### 📋 Project Master Data")
-        
-        edited_projects = st.data_editor(
-            st.session_state.master_data['projects'],
-            use_container_width=True,
-            num_rows="dynamic",
-            key="projects_editor"
-        )
-        st.session_state.master_data['projects'] = edited_projects
+    with right:
+        if not projects.empty:
+            figp = px.bar(projects, x="project_name", y="progress_percent")
+            figp.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10), yaxis=dict(range=[0, 100]))
+            st.plotly_chart(figp, use_container_width=True)
 
-# ============================================================
-# TAB 4: MDS (Marketing)
-# ============================================================
-with tabs[3]:
-    st.markdown('<p class="section-header">💼 MDS - Marketing Data System</p>', unsafe_allow_html=True)
-    
-    mds_tabs = st.tabs(["📊 Overview", "➕ New Lead", "📋 Lead Management", "📈 Analytics"])
-    
-    with mds_tabs[0]:
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        mds_df = st.session_state.transactions['mds']
-        
-        with col1:
-            st.metric("Total Leads", len(mds_df))
-        with col2:
-            hot_count = len(mds_df[mds_df['status'] == 'Hot'])
-            st.metric("Hot Leads", hot_count, f"{hot_count/max(len(mds_df),1)*100:.0f}%")
-        with col3:
-            total_value = mds_df['value'].sum()
-            st.metric("Total Value", f"฿{total_value:,.0f}")
-        with col4:
-            avg_value = mds_df['value'].mean()
-            st.metric("Avg Deal Size", f"฿{avg_value:,.0f}")
-        
-        st.markdown("---")
-        
-        # Recent Leads
-        st.markdown("#### Recent Leads")
-        st.dataframe(mds_df.sort_values('timestamp', ascending=False), use_container_width=True)
-    
-    with mds_tabs[1]:
-        st.markdown("### ➕ Add New Lead")
-        
-        with st.form("new_lead_form"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                lead_name = st.text_input("Lead Name *")
-                lead_source = st.selectbox("Source", ['SME Project', 'Website', 'Facebook', 'Referral', 'Cold Call'])
-                lead_value = st.number_input("Estimated Value (฿)", min_value=0, value=1000000)
-            
-            with col2:
-                lead_status = st.select_slider("Temperature", options=['Cold', 'Warm', 'Hot'])
-                customer_link = st.selectbox(
-                    "Link to Customer",
-                    ['-- New Customer --'] + st.session_state.master_data['customers']['name'].tolist()
-                )
-                assigned_to = st.selectbox(
-                    "Assigned To",
-                    st.session_state.master_data['employees']['name'].tolist()
-                )
-            
-            notes = st.text_area("Notes")
-            
-            if st.form_submit_button("💾 Save Lead", type="primary"):
-                if lead_name:
-                    new_lead = pd.DataFrame({
-                        'id': [generate_id('MDS')],
-                        'timestamp': [datetime.now()],
-                        'customer_id': ['NEW' if customer_link == '-- New Customer --' else customer_link],
-                        'lead_name': [lead_name],
-                        'source': [lead_source],
-                        'value': [lead_value],
-                        'status': [lead_status],
-                        'assigned_to': [assigned_to]
-                    })
-                    st.session_state.transactions['mds'] = pd.concat([
-                        st.session_state.transactions['mds'], new_lead
-                    ], ignore_index=True)
-                    st.success(f"✅ Lead '{lead_name}' added successfully!")
-                    st.balloons()
-                else:
-                    st.error("Please enter lead name")
-    
-    with mds_tabs[2]:
-        st.markdown("### 📋 Lead Management")
-        
-        # Filters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            filter_status = st.multiselect("Filter by Status", ['Hot', 'Warm', 'Cold'], default=['Hot', 'Warm', 'Cold'])
-        with col2:
-            filter_source = st.multiselect("Filter by Source", mds_df['source'].unique().tolist(), default=mds_df['source'].unique().tolist())
-        with col3:
-            sort_by = st.selectbox("Sort by", ['timestamp', 'value', 'status'])
-        
-        # Filtered data
-        filtered_df = mds_df[
-            (mds_df['status'].isin(filter_status)) &
-            (mds_df['source'].isin(filter_source))
-        ].sort_values(sort_by, ascending=False)
-        
-        # Editable table
-        edited_mds = st.data_editor(filtered_df, use_container_width=True, num_rows="dynamic")
-    
-    with mds_tabs[3]:
-        st.markdown("### 📈 MDS Analytics")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Source distribution
-            source_data = mds_df.groupby('source')['value'].sum().reset_index()
-            fig_source = px.bar(source_data, x='source', y='value', title='Value by Source',
-                               color='source', color_discrete_sequence=px.colors.qualitative.Set2)
-            fig_source.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#94a3b8')
-            st.plotly_chart(fig_source, use_container_width=True)
-        
-        with col2:
-            # Status timeline
-            fig_timeline = px.scatter(mds_df, x='timestamp', y='value', color='status',
-                                     title='Lead Timeline',
-                                     color_discrete_map={'Hot': '#ef4444', 'Warm': '#f59e0b', 'Cold': '#3b82f6'})
-            fig_timeline.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#94a3b8')
-            st.plotly_chart(fig_timeline, use_container_width=True)
+    st.divider()
 
-# ============================================================
-# TAB 5: SGS (Strategy)
-# ============================================================
-with tabs[4]:
-    st.markdown('<p class="section-header">🧭 SGS - Strategic Guidance System</p>', unsafe_allow_html=True)
-    
-    sgs_tabs = st.tabs(["📊 Overview", "➕ New Project", "⚠️ Risk Matrix", "📈 Analytics"])
-    
-    with sgs_tabs[0]:
-        sgs_df = st.session_state.transactions['sgs']
-        
-        # Metrics
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Projects", len(sgs_df))
-        with col2:
-            total_funding = sgs_df['funding'].sum()
-            st.metric("Total Funding", f"{total_funding} MB")
-        with col3:
-            high_risk = len(sgs_df[sgs_df['risk'] == 'High'])
-            st.metric("High Risk Projects", high_risk)
-        
-        st.markdown("---")
-        st.dataframe(sgs_df, use_container_width=True)
-    
-    with sgs_tabs[1]:
-        st.markdown("### ➕ Add New Project")
-        
-        with st.form("new_project_form"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                proj_name = st.text_input("Project Name *")
-                proj_funding = st.number_input("Budget (MB)", min_value=0, value=50)
-            
-            with col2:
-                proj_risk = st.selectbox("Risk Level", ['Low', 'Medium', 'High'])
-                proj_progress = st.slider("Progress %", 0, 100, 0)
-            
-            proj_desc = st.text_area("Description")
-            
-            if st.form_submit_button("💾 Save Project", type="primary"):
-                if proj_name:
-                    new_proj = pd.DataFrame({
-                        'id': [generate_id('SGS')],
-                        'timestamp': [datetime.now()],
-                        'project_id': [generate_id('PRJ')],
-                        'project_name': [proj_name],
-                        'funding': [proj_funding],
-                        'risk': [proj_risk],
-                        'progress': [proj_progress]
-                    })
-                    st.session_state.transactions['sgs'] = pd.concat([
-                        st.session_state.transactions['sgs'], new_proj
-                    ], ignore_index=True)
-                    st.success(f"✅ Project '{proj_name}' added!")
-    
-    with sgs_tabs[2]:
-        st.markdown("### ⚠️ Risk Assessment Matrix")
-        
-        # Risk matrix visualization
-        risk_categories = ['Financial', 'Operational', 'Strategic', 'Compliance', 'Technical']
-        likelihood = [4, 3, 5, 2, 3]
-        impact = [5, 4, 4, 3, 4]
-        
-        fig_risk = go.Figure()
-        fig_risk.add_trace(go.Scatter(
-            x=likelihood, y=impact,
-            mode='markers+text',
-            marker=dict(size=30, color=['#ef4444', '#f59e0b', '#ef4444', '#22c55e', '#f59e0b']),
-            text=risk_categories,
-            textposition='top center',
-            textfont=dict(color='white')
-        ))
-        
-        # Add quadrants
-        fig_risk.add_shape(type="rect", x0=0, y0=0, x1=2.5, y1=2.5, fillcolor="rgba(34, 197, 94, 0.2)", line=dict(width=0))
-        fig_risk.add_shape(type="rect", x0=2.5, y0=0, x1=5, y1=2.5, fillcolor="rgba(245, 158, 11, 0.2)", line=dict(width=0))
-        fig_risk.add_shape(type="rect", x0=0, y0=2.5, x1=2.5, y1=5, fillcolor="rgba(245, 158, 11, 0.2)", line=dict(width=0))
-        fig_risk.add_shape(type="rect", x0=2.5, y0=2.5, x1=5, y1=5, fillcolor="rgba(239, 68, 68, 0.2)", line=dict(width=0))
-        
-        fig_risk.update_layout(
-            title="Risk Heat Map",
-            xaxis_title="Likelihood",
-            yaxis_title="Impact",
-            xaxis=dict(range=[0, 5], tickvals=[1, 2, 3, 4, 5]),
-            yaxis=dict(range=[0, 5], tickvals=[1, 2, 3, 4, 5]),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font_color='#94a3b8',
-            height=500
-        )
-        st.plotly_chart(fig_risk, use_container_width=True)
-    
-    with sgs_tabs[3]:
-        st.markdown("### 📈 Strategic Analytics")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig_funding = px.bar(sgs_df, x='project_name', y='funding', color='risk',
-                                title='Funding by Project',
-                                color_discrete_map={'High': '#ef4444', 'Medium': '#f59e0b', 'Low': '#22c55e'})
-            fig_funding.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#94a3b8')
-            st.plotly_chart(fig_funding, use_container_width=True)
-        
-        with col2:
-            fig_progress = px.bar(sgs_df, x='project_name', y='progress', title='Project Progress',
-                                 color='progress', color_continuous_scale='Blues')
-            fig_progress.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#94a3b8')
-            st.plotly_chart(fig_progress, use_container_width=True)
-
-# ============================================================
-# TAB 6: BMS (Governance)
-# ============================================================
-with tabs[5]:
-    st.markdown('<p class="section-header">⚖️ BMS - Board Management System</p>', unsafe_allow_html=True)
-    
-    bms_tabs = st.tabs(["📊 Overview", "➕ New Meeting", "📋 Meeting Records", "📄 Documents"])
-    
-    with bms_tabs[0]:
-        bms_df = st.session_state.transactions['bms']
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Meetings", len(bms_df))
-        with col2:
-            approved = len(bms_df[bms_df['status'] == 'Approved'])
-            st.metric("Approved Items", approved)
-        with col3:
-            pending = len(bms_df[bms_df['status'] == 'Pending'])
-            st.metric("Pending Items", pending)
-        
-        st.markdown("---")
-        st.dataframe(bms_df, use_container_width=True)
-    
-    with bms_tabs[1]:
-        st.markdown("### ➕ Schedule New Meeting")
-        
-        with st.form("new_meeting_form"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                meet_topic = st.text_input("Meeting Topic *")
-                meet_date = st.date_input("Meeting Date", datetime.now())
-            
-            with col2:
-                meet_time = st.time_input("Time", datetime.now().time())
-                meet_participants = st.number_input("Expected Participants", min_value=1, value=5)
-            
-            meet_agenda = st.text_area("Agenda")
-            
-            if st.form_submit_button("📅 Schedule Meeting", type="primary"):
-                if meet_topic:
-                    new_meet = pd.DataFrame({
-                        'id': [generate_id('BMS')],
-                        'timestamp': [datetime.now()],
-                        'topic': [meet_topic],
-                        'meeting_date': [meet_date],
-                        'status': ['Scheduled'],
-                        'participants': [meet_participants],
-                        'resolution': ['Pending']
-                    })
-                    st.session_state.transactions['bms'] = pd.concat([
-                        st.session_state.transactions['bms'], new_meet
-                    ], ignore_index=True)
-                    st.success(f"✅ Meeting '{meet_topic}' scheduled!")
-    
-    with bms_tabs[2]:
-        st.markdown("### 📋 Meeting Records")
-        
-        edited_bms = st.data_editor(
-            st.session_state.transactions['bms'],
-            use_container_width=True,
-            num_rows="dynamic"
-        )
-        st.session_state.transactions['bms'] = edited_bms
-    
-    with bms_tabs[3]:
-        st.markdown("### 📄 Document Repository")
-        
-        # Simulated document list
-        docs = [
-            {'name': 'Board Charter 2024.pdf', 'type': 'Policy', 'uploaded': '2024-01-15'},
-            {'name': 'Risk Committee TOR.docx', 'type': 'Terms of Reference', 'uploaded': '2024-01-10'},
-            {'name': 'Annual Report 2023.pdf', 'type': 'Report', 'uploaded': '2024-02-01'},
-        ]
-        
-        for doc in docs:
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1:
-                st.write(f"📄 {doc['name']}")
-            with col2:
-                st.write(doc['type'])
-            with col3:
-                st.write(doc['uploaded'])
-            with col4:
-                st.button("⬇️", key=f"dl_{doc['name']}")
-        
-        st.markdown("---")
-        st.file_uploader("Upload New Document", type=['pdf', 'docx', 'xlsx'])
-
-# ============================================================
-# TAB 7: IT (Operations)
-# ============================================================
-with tabs[6]:
-    st.markdown('<p class="section-header">🖥️ IT - Infrastructure Operations</p>', unsafe_allow_html=True)
-    
-    it_tabs = st.tabs(["📊 Dashboard", "🖥️ Servers", "📈 Metrics", "🔔 Alerts"])
-    
-    with it_tabs[0]:
-        it_df = st.session_state.transactions['it']
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Systems", len(it_df))
-        with col2:
-            avg_uptime = it_df['uptime'].mean()
-            st.metric("Avg Uptime", f"{avg_uptime:.2f}%")
-        with col3:
-            avg_cpu = it_df['cpu_usage'].mean()
-            st.metric("Avg CPU", f"{avg_cpu:.1f}%")
-        with col4:
-            avg_mem = it_df['memory_usage'].mean()
-            st.metric("Avg Memory", f"{avg_mem:.1f}%")
-        
-        st.markdown("---")
-        
-        # Server status cards
-        for _, server in it_df.iterrows():
-            status_color = '#22c55e' if server['status'] == 'Normal' else '#ef4444'
-            st.markdown(f"""
-            <div style="background: #1e293b; padding: 1rem; border-radius: 10px; margin-bottom: 0.5rem; border-left: 4px solid {status_color};">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <strong style="color: white;">{server['server']}</strong>
-                        <br><small style="color: #64748b;">Status: {server['status']} | Uptime: {server['uptime']}%</small>
-                    </div>
-                    <div style="text-align: right;">
-                        <span style="color: #3b82f6;">CPU: {server['cpu_usage']}%</span> |
-                        <span style="color: #8b5cf6;">MEM: {server['memory_usage']}%</span>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    with it_tabs[1]:
-        st.markdown("### 🖥️ Server Management")
-        st.data_editor(it_df, use_container_width=True)
-    
-    with it_tabs[2]:
-        st.markdown("### 📈 Performance Metrics")
-        
-        # Simulated time series data
-        times = pd.date_range(start=datetime.now() - timedelta(hours=24), periods=24, freq='H')
-        cpu_data = [random.randint(30, 70) for _ in range(24)]
-        mem_data = [random.randint(50, 80) for _ in range(24)]
-        
-        fig_metrics = go.Figure()
-        fig_metrics.add_trace(go.Scatter(x=times, y=cpu_data, name='CPU %', line=dict(color='#3b82f6')))
-        fig_metrics.add_trace(go.Scatter(x=times, y=mem_data, name='Memory %', line=dict(color='#8b5cf6')))
-        fig_metrics.update_layout(
-            title='System Metrics (24h)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font_color='#94a3b8',
-            legend=dict(orientation='h', yanchor='bottom', y=1.02),
-            height=400
-        )
-        st.plotly_chart(fig_metrics, use_container_width=True)
-    
-    with it_tabs[3]:
-        st.markdown("### 🔔 Alert Configuration")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### Active Alerts")
-            alerts = [
-                {'type': 'Warning', 'message': 'Database B CPU > 60%', 'time': '10 min ago'},
-                {'type': 'Info', 'message': 'Scheduled maintenance in 2 hours', 'time': '1 hour ago'},
-            ]
-            for alert in alerts:
-                color = '#f59e0b' if alert['type'] == 'Warning' else '#3b82f6'
-                st.markdown(f"""
-                <div style="background: #1e293b; padding: 0.75rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid {color};">
-                    <strong style="color: {color};">{alert['type']}</strong>: {alert['message']}
-                    <br><small style="color: #64748b;">{alert['time']}</small>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("#### Alert Thresholds")
-            cpu_threshold = st.slider("CPU Alert Threshold", 0, 100, 80)
-            mem_threshold = st.slider("Memory Alert Threshold", 0, 100, 85)
-            uptime_threshold = st.slider("Uptime Alert Threshold", 90.0, 100.0, 99.0)
-            
-            if st.button("💾 Save Thresholds"):
-                st.success("Thresholds updated!")
-
-# ============================================================
-# TAB 8: REPORT GENERATOR
-# ============================================================
-with tabs[7]:
-    st.markdown('<p class="section-header">📝 Report Generator</p>', unsafe_allow_html=True)
-    
-    report_tabs = st.tabs(["📊 Quick Report", "📋 Custom Report", "📁 Templates", "📜 Report History"])
-    
-    with report_tabs[0]:
-        st.markdown("### 📊 Quick Report Generator")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            report_module = st.selectbox("Select Module", ['MDS - Marketing', 'SGS - Strategy', 'BMS - Governance', 'IT - Operations', 'All Modules'])
-            date_range = st.date_input("Date Range", [datetime.now() - timedelta(days=30), datetime.now()])
-        
-        with col2:
-            report_format = st.selectbox("Output Format", ['Excel', 'PDF', 'Word', 'JSON'])
-            include_charts = st.checkbox("Include Charts", value=True)
-        
-        if st.button("🚀 Generate Report", type="primary"):
-            with st.spinner("Generating report..."):
-                # Determine data based on module
-                if 'MDS' in report_module:
-                    report_data = st.session_state.transactions['mds']
-                elif 'SGS' in report_module:
-                    report_data = st.session_state.transactions['sgs']
-                elif 'BMS' in report_module:
-                    report_data = st.session_state.transactions['bms']
-                elif 'IT' in report_module:
-                    report_data = st.session_state.transactions['it']
-                else:
-                    # Combine all
-                    report_data = pd.concat([
-                        st.session_state.transactions['mds'].assign(module='MDS'),
-                        st.session_state.transactions['sgs'].assign(module='SGS'),
-                        st.session_state.transactions['bms'].assign(module='BMS'),
-                        st.session_state.transactions['it'].assign(module='IT')
-                    ], ignore_index=True)
-                
-                st.success("✅ Report generated successfully!")
-                
-                # Preview
-                st.markdown("#### Report Preview")
-                st.dataframe(report_data, use_container_width=True)
-                
-                # Download links
-                st.markdown("#### Download Report")
-                col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
-                
-                with col_dl1:
-                    st.markdown(create_download_link(report_data, 'report', 'excel'), unsafe_allow_html=True)
-                with col_dl2:
-                    st.markdown(create_download_link(report_data, 'report', 'csv'), unsafe_allow_html=True)
-                with col_dl3:
-                    st.markdown(create_download_link(report_data, 'report', 'json'), unsafe_allow_html=True)
-                with col_dl4:
-                    st.info("PDF/Word requires additional libraries")
-    
-    with report_tabs[1]:
-        st.markdown("### 📋 Custom Report Builder")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            # Data source selection
-            data_sources = st.multiselect(
-                "Select Data Sources",
-                ['MDS Leads', 'SGS Projects', 'BMS Meetings', 'IT Systems', 'Customer Master', 'Product Master']
+    # Risk
+    st.markdown("### 3) Risk & Governance Radar")
+    r1, r2 = st.columns([1.1, 1])
+    with r1:
+        if risks.empty:
+            st.info("ยังไม่มีข้อมูล fact_risk_event")
+        else:
+            # Scatter: likelihood vs impact, bubble = risk_score
+            fig_risk = px.scatter(
+                risks,
+                x="likelihood_score",
+                y="impact_score",
+                size="risk_score",
+                hover_data=["risk_category_name","risk_description","mitigation_status","risk_score"],
             )
-            
-            # Field selection (dynamic based on sources)
-            if data_sources:
-                available_fields = []
-                if 'MDS Leads' in data_sources:
-                    available_fields.extend(['lead_name', 'source', 'value', 'status'])
-                if 'SGS Projects' in data_sources:
-                    available_fields.extend(['project_name', 'funding', 'risk', 'progress'])
-                if 'BMS Meetings' in data_sources:
-                    available_fields.extend(['topic', 'meeting_date', 'status', 'participants'])
-                
-                selected_fields = st.multiselect("Select Fields", available_fields)
-            
-            # Filters
-            st.markdown("#### Filters")
-            filter_col1, filter_col2 = st.columns(2)
-            with filter_col1:
-                date_filter = st.date_input("Date Filter", [datetime.now() - timedelta(days=30), datetime.now()], key='custom_date')
-            with filter_col2:
-                status_filter = st.multiselect("Status Filter", ['All', 'Active', 'Pending', 'Completed'])
-            
-            # Grouping
-            st.markdown("#### Aggregation")
-            group_by = st.selectbox("Group By", ['None', 'Status', 'Source', 'Department', 'Date'])
-            
-            if st.button("🔨 Build Report", type="primary"):
-                st.success("Custom report built! (Demo mode)")
-                st.info("In production, this would generate a report based on selected options.")
-        
-        with col2:
-            st.markdown("#### Report Options")
-            st.checkbox("Include Summary Statistics", value=True)
-            st.checkbox("Include Trend Analysis", value=True)
-            st.checkbox("Include Recommendations", value=False)
-            st.checkbox("Add Cover Page", value=True)
-            st.checkbox("Add Table of Contents", value=True)
-            
-            st.markdown("#### Output Settings")
-            output_format = st.radio("Format", ['Excel', 'PDF', 'Word', 'JSON', 'HTML'])
-            
-            if output_format == 'PDF':
-                st.selectbox("Page Size", ['A4', 'Letter', 'Legal'])
-                st.selectbox("Orientation", ['Portrait', 'Landscape'])
-    
-    with report_tabs[2]:
-        st.markdown("### 📁 Report Templates")
-        
-        templates = st.session_state.report_templates
-        
-        for template in templates:
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            with col1:
-                st.write(f"📄 {template['name']}")
-            with col2:
-                st.write(template['type'])
-            with col3:
-                st.write(template['format'])
-            with col4:
-                if st.button("Use", key=f"use_{template['id']}"):
-                    st.info(f"Template '{template['name']}' selected")
-        
-        st.markdown("---")
-        st.markdown("#### Create New Template")
-        
-        with st.form("new_template"):
-            tpl_name = st.text_input("Template Name")
-            tpl_type = st.selectbox("Module Type", ['MDS', 'SGS', 'BMS', 'IT', 'All'])
-            tpl_format = st.selectbox("Default Format", ['Excel', 'PDF', 'Word', 'JSON'])
-            
-            if st.form_submit_button("💾 Save Template"):
-                st.session_state.report_templates.append({
-                    'id': generate_id('RPT'),
-                    'name': tpl_name,
-                    'type': tpl_type,
-                    'format': tpl_format
-                })
-                st.success("Template saved!")
-    
-    with report_tabs[3]:
-        st.markdown("### 📜 Report History")
-        
-        # Simulated history
-        history = [
-            {'name': 'Daily Sales Report', 'generated': '2024-01-20 09:00', 'format': 'Excel', 'status': 'Completed'},
-            {'name': 'Risk Assessment Q1', 'generated': '2024-01-19 14:30', 'format': 'PDF', 'status': 'Completed'},
-            {'name': 'Board Summary', 'generated': '2024-01-18 16:00', 'format': 'Word', 'status': 'Completed'},
-        ]
-        
-        st.dataframe(pd.DataFrame(history), use_container_width=True)
+            fig_risk.update_layout(
+                height=360,
+                xaxis=dict(range=[0, 5]),
+                yaxis=dict(range=[0, 5]),
+                margin=dict(l=10,r=10,t=10,b=10),
+            )
+            st.plotly_chart(fig_risk, use_container_width=True)
 
-# ============================================================
-# TAB 9: SETTINGS
-# ============================================================
-with tabs[8]:
-    st.markdown('<p class="section-header">⚙️ System Settings</p>', unsafe_allow_html=True)
-    
-    settings_tabs = st.tabs(["🎨 Appearance", "🔐 Security", "🔗 Integrations", "📊 Data Management", "ℹ️ About"])
-    
-    with settings_tabs[0]:
-        st.markdown("### 🎨 Appearance Settings")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.selectbox("Theme", ['Dark (Default)', 'Light', 'System'])
-            st.selectbox("Language", ['English', 'ไทย'])
-            st.selectbox("Date Format", ['YYYY-MM-DD', 'DD/MM/YYYY', 'MM/DD/YYYY'])
-        
-        with col2:
-            st.selectbox("Number Format", ['1,234.56', '1.234,56', '1 234.56'])
-            st.selectbox("Currency", ['THB (฿)', 'USD ($)', 'EUR (€)'])
-            st.slider("Dashboard Refresh Rate (seconds)", 10, 300, 60)
-    
-    with settings_tabs[1]:
-        st.markdown("### 🔐 Security Settings")
-        
-        st.checkbox("Enable Two-Factor Authentication", value=False)
-        st.checkbox("Session Timeout (30 minutes)", value=True)
-        st.checkbox("Audit Logging", value=True)
-        
-        st.markdown("#### Password Policy")
-        st.slider("Minimum Password Length", 8, 20, 12)
-        st.checkbox("Require Special Characters", value=True)
-        st.checkbox("Require Numbers", value=True)
-    
-    with settings_tabs[2]:
-        st.markdown("### 🔗 API & Integrations")
-        
-        st.text_input("API Endpoint", "https://api.smd-dataverse.com/v1")
-        st.text_input("API Key", type="password", value="sk-xxxxx")
-        
-        st.markdown("#### Connected Services")
-        services = [
-            {'name': 'Microsoft 365', 'status': 'Connected'},
-            {'name': 'Salesforce', 'status': 'Not Connected'},
-            {'name': 'SAP', 'status': 'Connected'},
-        ]
-        
-        for svc in services:
-            col1, col2, col3 = st.columns([2, 1, 1])
-            with col1:
-                st.write(svc['name'])
-            with col2:
-                status_color = 'green' if svc['status'] == 'Connected' else 'red'
-                st.markdown(f":{status_color}[{svc['status']}]")
-            with col3:
-                st.button("Configure", key=f"cfg_{svc['name']}")
-    
-    with settings_tabs[3]:
-        st.markdown("### 📊 Data Management")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### Export All Data")
-            if st.button("📥 Export Complete Backup"):
-                # Combine all data
-                all_data = {
-                    'master_data': {k: v.to_dict() for k, v in st.session_state.master_data.items()},
-                    'transactions': {k: v.to_dict() for k, v in st.session_state.transactions.items()}
-                }
-                json_str = json.dumps(all_data, default=str, indent=2)
-                b64 = base64.b64encode(json_str.encode()).decode()
-                href = f'<a href="data:file/json;base64,{b64}" download="smd_dataverse_backup.json">📥 Download Backup File</a>'
-                st.markdown(href, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("#### Clear Data")
-            st.warning("⚠️ This action cannot be undone!")
-            
-            clear_option = st.selectbox("Select data to clear", [
-                '-- Select --',
-                'MDS Transactions',
-                'SGS Transactions', 
-                'BMS Transactions',
-                'IT Transactions',
-                'All Transactions',
-                'All Data (Factory Reset)'
-            ])
-            
-            if st.button("🗑️ Clear Selected Data", type="secondary"):
-                if clear_option != '-- Select --':
-                    st.error(f"Would clear: {clear_option} (Disabled in demo)")
-    
-    with settings_tabs[4]:
-        st.markdown("### ℹ️ About SMD Dataverse")
-        
-        st.markdown("""
-        <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 2rem; border-radius: 12px; text-align: center;">
-            <h1 style="font-size: 3rem; margin: 0;">🧊</h1>
-            <h2 style="background: linear-gradient(90deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">SMD Dataverse Platform</h2>
-            <p style="color: #94a3b8;">Enterprise Data Management Solution</p>
-            <p style="color: #64748b;">Version 5.0.0</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        ---
-        
-        **Features:**
-        - 📥 Multi-format data import (Excel, CSV, PDF, Word)
-        - 📊 Master data management
-        - 💼 MDS - Marketing Data System
-        - 🧭 SGS - Strategic Guidance System
-        - ⚖️ BMS - Board Management System
-        - 🖥️ IT - Operations Management
-        - 📝 Custom report generation (Excel, PDF, Word, JSON)
-        - 🔗 API integrations
-        
-        **Technology Stack:**
-        - Python 3.11+
-        - Streamlit
-        - Pandas
-        - Plotly
-        - OpenPyXL
-        
-        ---
-        
-        © 2024 SMD Dataverse. All rights reserved.
-        """)
+    with r2:
+        if not risks.empty:
+            open_cnt = int(risks["mitigation_status"].isin(["Open", "In Progress"]).sum())
+            st.metric("Risks ที่ยังเปิดอยู่", open_cnt)
+            st.markdown("**Top Risks (คะแนนสูงสุด)**")
+            top_r = risks.sort_values("risk_score", ascending=False).head(3)
+            st.dataframe(
+                top_r[["risk_category_name","risk_description","risk_score","mitigation_status"]],
+                use_container_width=True,
+                hide_index=True
+            )
 
-# ============================================================
-# FOOTER
-# ============================================================
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #64748b; font-size: 0.8rem;">
-    SMD Dataverse Platform v5.0 | © 2024 | 
-    <a href="#" style="color: #3b82f6;">Documentation</a> | 
-    <a href="#" style="color: #3b82f6;">Support</a>
-</div>
-""", unsafe_allow_html=True)
+    st.divider()
+
+    # Signals
+    st.markdown("### 4) External Intelligence Signals")
+    s1, s2 = st.columns([1.3, 1])
+    with s1:
+        if signals.empty:
+            st.info("ยังไม่มีข้อมูล fact_external_signal")
+        else:
+            st.dataframe(
+                signals[["topic_name","signal_type","relevance_score","sentiment_score","source_name","strategy_name"]],
+                use_container_width=True,
+                hide_index=True
+            )
+    with s2:
+        if not signals.empty:
+            figs = px.scatter(
+                signals,
+                x="relevance_score",
+                y="sentiment_score",
+                color="signal_type",
+                hover_data=["topic_name","source_name","strategy_name"]
+            )
+            figs.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(figs, use_container_width=True)
+
+    st.divider()
+
+    # Action panel
+    st.markdown("### 5) Executive Action Panel (สิ่งที่ต้องตัดสินใจ)")
+    action_items = []
+
+    if not kpi.empty:
+        for _, row in kpi[kpi["kpi_status"] == "Red"].iterrows():
+            action_items.append(
+                f"⚠️ KPI แดง: **{row['kpi_name']}** ({row['strategy_name']}) → ขอแผนแก้ไข/เจ้าภาพ/เส้นตาย"
+            )
+
+    if not projects.empty:
+        high = projects[projects["risk_level"].isin(["High","สูง","H"])]
+        for _, row in high.iterrows():
+            action_items.append(
+                f"🚧 โครงการเสี่ยงสูง: **{row['project_name']}** → ขอผู้บริหารกำหนดแนวทาง/ทรัพยากร"
+            )
+
+    if not risks.empty:
+        critical = risks[risks["risk_score"] >= 15]
+        for _, row in critical.iterrows():
+            action_items.append(
+                f"🔥 Risk สูง: **{row['risk_category_name']}** (score {row['risk_score']}) → {row['mitigation_status']}"
+            )
+
+    if not signals.empty:
+        high_rel = signals[signals["relevance_score"] >= 0.85]
+        for _, row in high_rel.iterrows():
+            action_items.append(
+                f"📣 Signal สำคัญ: **{row['topic_name']}** ({row['signal_type']}) กระทบ {row['strategy_name']}"
+            )
+
+    if not action_items:
+        st.success("ไม่มีประเด็นเร่งด่วน (หรือยังไม่มีข้อมูล) — ลอง Seed/Import แล้วรีเฟรช")
+    else:
+        for a in action_items[:12]:
+            st.write(a)
+
+    with st.expander("🔎 Data Workbench"):
+        t1, t2, t3, t4 = st.tabs(["KPI Facts", "Projects", "Risks", "Signals"])
+        with t1:
+            st.dataframe(kpi, use_container_width=True)
+        with t2:
+            st.dataframe(projects, use_container_width=True)
+        with t3:
+            st.dataframe(risks, use_container_width=True)
+        with t4:
+            st.dataframe(signals, use_container_width=True)
+
+# =========================
+# Page: Data Import
+# =========================
+elif page == "Data Import":
+    st.markdown("## ⬆️ Data Import (CSV → Replace Table)")
+    st.caption("MVP: Import จะ **replace ทั้งตาราง** เพื่อความง่ายในการทดสอบ/เดโม")
+
+    table = st.selectbox("เลือกตาราง", list(TABLE_COLUMNS.keys()))
+    st.markdown("### 1) ดาวน์โหลด Template CSV")
+    st.download_button(
+        label=f"Download template: {table}.csv",
+        data=make_template_csv(table),
+        file_name=f"{table}.csv",
+        mime="text/csv",
+    )
+
+    st.markdown("### 2) อัปโหลด CSV เพื่อ Import")
+    up = st.file_uploader("Upload CSV", type=["csv"])
+    if up is not None:
+        df = pd.read_csv(up)
+        st.markdown("### Preview")
+        st.dataframe(df.head(50), use_container_width=True)
+        missing = [c for c in TABLE_COLUMNS[table] if c not in df.columns]
+        extra = [c for c in df.columns if c not in TABLE_COLUMNS[table]]
+
+        if missing:
+            st.error(f"CSV ขาดคอลัมน์: {missing}")
+        if extra:
+            st.warning(f"CSV มีคอลัมน์เกิน (ไม่เป็นไรแต่จะเก็บไปด้วย): {extra}")
+
+        if st.button("Import (Replace Table)"):
+            replace_table(table, df)
+            st.success(f"Imported -> {table}")
+            st.rerun()
+
+# =========================
+# Page: Schema / Templates
+# =========================
+else:
+    st.markdown("## 🧾 Schema / Templates")
+    st.write("ตารางทั้งหมดที่ใช้ใน MVP นี้:")
+    for t, cols in TABLE_COLUMNS.items():
+        with st.expander(t):
+            st.code(", ".join(cols))
+
+    st.markdown("### Quick Start (Streamlit Cloud)")
+    st.markdown("""
+1) สร้าง GitHub repo แล้วใส่ไฟล์ `app.py` และ `requirements.txt`\n
+2) ไปที่ Streamlit Cloud → New app → เลือก repo/branch → main file = `app.py`\n
+3) เปิดแอป → กด **Seed Demo Data** หรือ Import CSV เพื่อใช้ข้อมูลจริง\n
+""")
