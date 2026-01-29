@@ -10,6 +10,7 @@ import hashlib
 
 # =========================================================
 # Intelligence Hub (MVP++) - RBAC + Meeting → Action Items
+# + Bootstrap Admin/Seed on first run (fix "can't login")
 # =========================================================
 
 st.set_page_config(
@@ -23,6 +24,9 @@ DB_PATH = Path("intelligence_hub.db")
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# -------------------------
+# DB helpers
+# -------------------------
 def get_conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
@@ -30,10 +34,7 @@ def exec_sql(sql: str, params=None) -> None:
     conn = get_conn()
     cur = conn.cursor()
     try:
-        if params is None:
-            cur.execute(sql)
-        else:
-            cur.execute(sql, params)
+        cur.execute(sql, params or ())
         conn.commit()
     finally:
         conn.close()
@@ -60,10 +61,10 @@ def ensure_dim_date(start: date, end: date) -> None:
     d = start
     while d <= end:
         date_id = int(d.strftime("%Y%m%d"))
-        cur.execute("""
-            INSERT OR IGNORE INTO dim_date(date_id, date, month, quarter, year)
-            VALUES (?, ?, ?, ?, ?)
-        """, (date_id, d.isoformat(), d.month, (d.month - 1)//3 + 1, d.year))
+        cur.execute(
+            "INSERT OR IGNORE INTO dim_date(date_id, date, month, quarter, year) VALUES (?, ?, ?, ?, ?)",
+            (date_id, d.isoformat(), d.month, (d.month - 1)//3 + 1, d.year),
+        )
         d += timedelta(days=1)
     conn.commit()
     conn.close()
@@ -77,26 +78,28 @@ def uid(prefix: str) -> str:
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+# -------------------------
+# DB init
+# -------------------------
 def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
 
-    # Dimensions
     cur.execute("""CREATE TABLE IF NOT EXISTS dim_date (date_id INTEGER PRIMARY KEY, date TEXT NOT NULL, month INTEGER, quarter INTEGER, year INTEGER)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS dim_strategy (strategy_id TEXT PRIMARY KEY, strategy_name TEXT NOT NULL, strategy_owner TEXT, strategy_level TEXT, start_year INTEGER, end_year INTEGER)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS dim_kpi (kpi_id TEXT PRIMARY KEY, kpi_name TEXT NOT NULL, kpi_definition TEXT, calculation_logic TEXT, kpi_owner TEXT, refresh_frequency TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS dim_person (person_id TEXT PRIMARY KEY, person_name TEXT NOT NULL, role TEXT, department TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS dim_organization (organization_id TEXT PRIMARY KEY, organization_name TEXT NOT NULL, org_type TEXT, sector TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS dim_department (dept_id TEXT PRIMARY KEY, dept_name TEXT NOT NULL, dept_head_person_id TEXT, description TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS dim_work_type (work_type_id TEXT PRIMARY KEY, work_type_name TEXT NOT NULL)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS dim_person (person_id TEXT PRIMARY KEY, person_name TEXT NOT NULL, role TEXT, department TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS dim_strategy (strategy_id TEXT PRIMARY KEY, strategy_name TEXT NOT NULL, strategy_owner TEXT, strategy_level TEXT, start_year INTEGER, end_year INTEGER)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS dim_kpi (kpi_id TEXT PRIMARY KEY, kpi_name TEXT NOT NULL, kpi_definition TEXT, calculation_logic TEXT, kpi_owner TEXT, refresh_frequency TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS dim_organization (organization_id TEXT PRIMARY KEY, organization_name TEXT NOT NULL, org_type TEXT, sector TEXT)""")
 
-    # Users for RBAC
+    # RBAC users
     cur.execute("""
     CREATE TABLE IF NOT EXISTS dim_user (
         username TEXT PRIMARY KEY,
         password_hash TEXT NOT NULL,
-        role TEXT NOT NULL,
-        dept_id TEXT,
+        role TEXT NOT NULL,           -- Admin | Executive | DeptHead | Staff
+        dept_id TEXT,                 -- restrict data scope for DeptHead/Staff
         person_id TEXT,
         is_enabled INTEGER NOT NULL DEFAULT 1
     )
@@ -162,7 +165,7 @@ def init_db() -> None:
     )
     """)
 
-    # Meetings + Action items
+    # Meeting → Decision → Action
     cur.execute("""
     CREATE TABLE IF NOT EXISTS fact_meeting (
         meeting_id TEXT PRIMARY KEY,
@@ -205,59 +208,22 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-# -------------------------
-# RBAC helpers
-# -------------------------
-def is_logged_in() -> bool:
-    return bool(st.session_state.get("auth", {}).get("logged_in"))
-
-def current_user():
-    return st.session_state.get("auth", {})
-
-def require_login():
-    if not is_logged_in():
-        st.warning("กรุณาเข้าสู่ระบบก่อน")
-        st.stop()
-
-def can_view(page: str) -> bool:
-    role = current_user().get("role")
-    if role == "Admin":
+def user_table_empty() -> bool:
+    try:
+        df = read_df("SELECT COUNT(*) AS n FROM dim_user")
+        return int(df.iloc[0]["n"]) == 0
+    except Exception:
         return True
-    if page in ["Executive View", "Meeting → Action Items"]:
-        return role in ["Executive", "Admin"]
-    if page == "Department Workspace":
-        return role in ["DeptHead", "Staff", "Admin", "Executive"]
-    if page in ["Data Import", "Admin / User Management", "Schema / Templates"]:
-        return role in ["Admin"]
-    return False
 
-def allowed_dept_scope():
-    role = current_user().get("role")
-    if role in ["Admin", "Executive"]:
-        return None
-    return current_user().get("dept_id")
+def bootstrap_create_admin(username: str, password: str) -> None:
+    exec_sql(
+        "INSERT OR REPLACE INTO dim_user(username, password_hash, role, dept_id, person_id, is_enabled) VALUES (?, ?, ?, ?, ?, ?)",
+        (username.strip(), sha256(password), "Admin", None, None, 1),
+    )
 
-TABLE_COLUMNS = {
-    "dim_department": ["dept_id","dept_name","dept_head_person_id","description"],
-    "dim_work_type": ["work_type_id","work_type_name"],
-    "dim_user": ["username","password_hash","role","dept_id","person_id","is_enabled"],
-    "dim_person": ["person_id","person_name","role","department"],
-    "dim_strategy": ["strategy_id","strategy_name","strategy_owner","strategy_level","start_year","end_year"],
-    "dim_kpi": ["kpi_id","kpi_name","kpi_definition","calculation_logic","kpi_owner","refresh_frequency"],
-    "dim_organization": ["organization_id","organization_name","org_type","sector"],
-    "fact_dept_work_item": ["work_id","dept_id","organization_id","strategy_id","kpi_id","owner_person_id","work_title","work_type_id","priority","status","start_date_id","due_date_id","progress_percent","risk_level","decision_needed","notes","last_updated_ts"],
-    "fact_work_update": ["update_id","work_id","date_id","progress_percent","update_text","blockers","decision_needed","created_ts"],
-    "fact_work_evidence": ["evidence_id","work_id","date_id","file_name","stored_path","note","uploaded_ts"],
-    "fact_meeting": ["meeting_id","meeting_date_id","meeting_title","meeting_type","organizer_person_id","minutes_text","created_ts"],
-    "fact_meeting_decision": ["decision_id","meeting_id","decision_text","decision_owner_person_id","created_ts"],
-    "fact_meeting_action_item": ["action_id","meeting_id","decision_id","dept_id","owner_person_id","action_title","status","start_date_id","due_date_id","progress_percent","blockers","decision_needed","linked_work_id","last_updated_ts"],
-    "fact_strategic_kpi": ["kpi_fact_id","date_id","strategy_id","organization_id","kpi_id","actual_value","target_value","variance_value","kpi_status","last_updated_ts"],
-}
-
-def make_template_csv(table: str) -> bytes:
-    df = pd.DataFrame(columns=TABLE_COLUMNS[table])
-    return df.to_csv(index=False).encode("utf-8")
-
+# -------------------------
+# Seed demo
+# -------------------------
 def seed_demo_data() -> None:
     today = date.today()
     ensure_dim_date(today - timedelta(days=365), today + timedelta(days=90))
@@ -308,15 +274,18 @@ def seed_demo_data() -> None:
     ]))
 
     meeting_id = "MTG_1"
-    exec_sql("""INSERT OR REPLACE INTO fact_meeting VALUES (?, ?, ?, ?, ?, ?, ?)""",
+    exec_sql("INSERT OR REPLACE INTO fact_meeting VALUES (?, ?, ?, ?, ?, ?, ?)",
              (meeting_id, d0, "คกก.บริหารประจำเดือน", "Committee", "P1", "สรุปการประชุมฉบับย่อ...", datetime.now().isoformat()))
     decision_id = "DEC_1"
-    exec_sql("""INSERT OR REPLACE INTO fact_meeting_decision VALUES (?, ?, ?, ?, ?)""",
+    exec_sql("INSERT OR REPLACE INTO fact_meeting_decision VALUES (?, ?, ?, ?, ?)",
              (decision_id, meeting_id, "เร่งลด compliance findings ภายใน 30 วัน", "P1", datetime.now().isoformat()))
-    exec_sql("""INSERT OR REPLACE INTO fact_meeting_action_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    exec_sql("INSERT OR REPLACE INTO fact_meeting_action_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
              ("ACT_1", meeting_id, decision_id, "D3", "P4", "จัดทำแผนปิด findings + ติดตามหลักฐาน", "In Progress",
               d0, d0 + 30, 20, "รอข้อมูลจากหลายฝ่าย", 1, None, datetime.now().isoformat()))
 
+# -------------------------
+# Auth + RBAC
+# -------------------------
 def login(username: str, password: str) -> bool:
     df = read_df("SELECT * FROM dim_user WHERE username = ? AND is_enabled = 1", params=(username,))
     if df.empty:
@@ -336,6 +305,36 @@ def login(username: str, password: str) -> bool:
 def logout():
     st.session_state["auth"] = {"logged_in": False}
 
+def is_logged_in() -> bool:
+    return bool(st.session_state.get("auth", {}).get("logged_in"))
+
+def current_user():
+    return st.session_state.get("auth", {})
+
+def require_login():
+    if not is_logged_in():
+        st.warning("กรุณาเข้าสู่ระบบก่อน")
+        st.stop()
+
+def can_view(page: str) -> bool:
+    role = current_user().get("role")
+    if role == "Admin":
+        return True
+    if page in ["Executive View", "Meeting → Action Items"]:
+        return role in ["Executive"]
+    if page == "Department Workspace":
+        return role in ["DeptHead", "Staff", "Executive"]
+    return False
+
+def allowed_dept_scope():
+    role = current_user().get("role")
+    if role in ["Admin", "Executive"]:
+        return None
+    return current_user().get("dept_id")
+
+# -------------------------
+# Exec loaders
+# -------------------------
 def load_exec_data(as_of_id: int, org_id: str):
     kpi = read_df(f"""
         SELECT f.*, k.kpi_name, s.strategy_name
@@ -345,11 +344,10 @@ def load_exec_data(as_of_id: int, org_id: str):
         WHERE f.date_id = {as_of_id} AND f.organization_id = '{org_id}'
     """)
     dept_work = read_df(f"""
-        SELECT w.*, d.dept_name, p.person_name, wt.work_type_name
+        SELECT w.*, d.dept_name, p.person_name
         FROM fact_dept_work_item w
         LEFT JOIN dim_department d ON w.dept_id = d.dept_id
         LEFT JOIN dim_person p ON w.owner_person_id = p.person_id
-        LEFT JOIN dim_work_type wt ON w.work_type_id = wt.work_type_id
         WHERE w.organization_id = '{org_id}'
     """)
     actions = read_df("""
@@ -371,9 +369,31 @@ if "auth" not in st.session_state:
 
 with st.sidebar:
     st.title("🧠 Intelligence Hub")
-    st.caption("MVP++ • RBAC • Meetings • Department Work")
+    st.caption("MVP++ • RBAC • Meeting → Action")
     st.divider()
 
+    # Bootstrap before login (fix)
+    if not is_logged_in() and user_table_empty():
+        st.warning("ระบบยังไม่มีผู้ใช้ในฐานข้อมูล (ครั้งแรกที่รัน) — กรุณา Bootstrap หรือ Seed ก่อน")
+        with st.expander("🔧 Bootstrap: สร้าง Admin คนแรก", expanded=True):
+            b_user = st.text_input("Admin Username", value="admin")
+            b_pass = st.text_input("Admin Password", type="password")
+            if st.button("Create Admin", type="primary"):
+                if not b_user.strip() or not b_pass:
+                    st.error("กรุณากรอก username และ password")
+                else:
+                    bootstrap_create_admin(b_user, b_pass)
+                    st.success("สร้าง Admin สำเร็จ — ตอนนี้ Login ได้แล้ว")
+                    st.rerun()
+
+        if st.button("🌱 Seed Demo Data"):
+            seed_demo_data()
+            st.success("Seed demo data เรียบร้อย — Login: admin/demo123")
+            st.rerun()
+
+        st.stop()
+
+    # Login
     if not is_logged_in():
         st.subheader("เข้าสู่ระบบ")
         u = st.text_input("Username")
@@ -384,7 +404,6 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error("Username/Password ไม่ถูกต้อง หรือบัญชีถูกปิดใช้งาน")
-        st.info("เดโม: กด Seed (admin) แล้วใช้ admin/director/ops_head/ops_staff/gov_head รหัส demo123")
     else:
         st.subheader("ผู้ใช้")
         st.write(f"**{current_user()['username']}**")
@@ -396,7 +415,7 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.markdown("### As-of & Filters")
+    st.markdown("### Filters")
     as_of_txt = st.text_input("As-of date_id (YYYYMMDD)", value=date.today().strftime("%Y%m%d"))
     org_id = st.text_input("organization_id", value="ORG1")
     try:
@@ -405,34 +424,25 @@ with st.sidebar:
         as_of_id = int(date.today().strftime("%Y%m%d"))
 
     st.divider()
-    pages = ["Executive View", "Department Workspace", "Meeting → Action Items", "Data Import", "Admin / User Management", "Schema / Templates"]
+    st.markdown("### Navigation")
+    pages = ["Executive View", "Department Workspace", "Meeting → Action Items"]
     if is_logged_in():
         visible = [pg for pg in pages if can_view(pg)]
     else:
-        visible = ["Schema / Templates"]
-    if is_logged_in() and current_user().get("role") == "Admin":
-        if st.button("🌱 Seed Demo Data"):
-            seed_demo_data()
-            st.success("Seed demo data เรียบร้อย")
-            st.rerun()
-    page = st.radio("ไปที่หน้า", visible, index=0)
-
-# Public schema page
-if page == "Schema / Templates" and not is_logged_in():
-    st.markdown("## 🧾 Schema / Templates (Public)")
-    table = st.selectbox("เลือกตาราง", list(TABLE_COLUMNS.keys()))
-    st.download_button(f"Download template: {table}.csv", make_template_csv(table), f"{table}.csv", "text/csv")
-    st.stop()
+        visible = []
+    page = st.radio("ไปที่หน้า", visible, index=0) if visible else None
 
 require_login()
 
+# -------------------------
 # Executive View
+# -------------------------
 if page == "Executive View":
     st.markdown("## 📌 Executive View (1 หน้า)")
     kpi, dept_work, actions = load_exec_data(as_of_id, org_id)
     scope = allowed_dept_scope()
 
-    # KPI
+    # KPI cards
     c1, c2, c3, c4 = st.columns(4)
     if not kpi.empty:
         green = int((kpi["kpi_status"] == "Green").sum())
@@ -441,7 +451,10 @@ if page == "Executive View":
         total = int(len(kpi))
     else:
         green = amber = red = total = 0
-    c1.metric("KPI (ทั้งหมด)", total); c2.metric("Green", green); c3.metric("Amber", amber); c4.metric("Red", red)
+    c1.metric("KPI (ทั้งหมด)", total)
+    c2.metric("Green", green)
+    c3.metric("Amber", amber)
+    c4.metric("Red", red)
 
     if total > 0:
         fig = px.pie(pd.DataFrame({"status":["Green","Amber","Red"], "count":[green, amber, red]}), values="count", names="status")
@@ -457,7 +470,8 @@ if page == "Executive View":
     if dw.empty:
         st.info("ยังไม่มีงาน หรือคุณไม่มีสิทธิ์เห็น")
     else:
-        st.dataframe(dw[["dept_name","work_title","status","progress_percent","risk_level","decision_needed","due_date_id","person_name"]], use_container_width=True, hide_index=True)
+        st.dataframe(dw[["dept_name","work_title","status","progress_percent","risk_level","decision_needed","due_date_id","person_name"]],
+                     use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -468,10 +482,10 @@ if page == "Executive View":
     if act.empty:
         st.info("ยังไม่มี action items หรือคุณไม่มีสิทธิ์เห็น")
     else:
-        st.dataframe(act[["meeting_title","dept_name","action_title","status","progress_percent","due_date_id","decision_needed","person_name","linked_work_id"]], use_container_width=True, hide_index=True)
+        st.dataframe(act[["meeting_title","dept_name","action_title","status","progress_percent","due_date_id","decision_needed","person_name","linked_work_id"]],
+                     use_container_width=True, hide_index=True)
 
     st.divider()
-
     st.markdown("### Executive Action Panel")
     items = []
     if not kpi.empty:
@@ -491,16 +505,19 @@ if page == "Executive View":
         for it in items[:18]:
             st.write(it)
 
+# -------------------------
 # Department Workspace
+# -------------------------
 elif page == "Department Workspace":
     st.markdown("## 🧩 Department Workspace")
     scope = allowed_dept_scope()
+
     depts = read_df("SELECT * FROM dim_department ORDER BY dept_name")
     persons = read_df("SELECT * FROM dim_person ORDER BY person_name")
     wtypes = read_df("SELECT * FROM dim_work_type ORDER BY work_type_name")
 
     if depts.empty:
-        st.warning("ยังไม่มี dim_department — Admin ควร Seed หรือ Import ก่อน")
+        st.warning("ยังไม่มี dim_department — ให้ Admin Seed/Import ก่อน")
         st.stop()
 
     if scope:
@@ -529,20 +546,15 @@ elif page == "Department Workspace":
                 st.error("กรุณากรอกชื่องาน")
             else:
                 ensure_dim_date(start_d, due_d)
-                owner_id = None
-                if not persons.empty:
-                    owner_id = persons.loc[persons["person_name"] == owner, "person_id"].iloc[0]
-                wtype_id = None
-                if not wtypes.empty:
-                    wtype_id = wtypes.loc[wtypes["work_type_name"] == wtype, "work_type_id"].iloc[0]
+                owner_id = persons.loc[persons["person_name"] == owner, "person_id"].iloc[0] if not persons.empty else None
+                wtype_id = wtypes.loc[wtypes["work_type_name"] == wtype, "work_type_id"].iloc[0] if not wtypes.empty else None
                 work_id = uid("W")
-                exec_sql("""
-                    INSERT INTO fact_dept_work_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    work_id, dept_id, org_id, None, None, owner_id, title, wtype_id, priority, status,
-                    to_date_id(start_d), to_date_id(due_d), float(progress), risk, 1 if decision_needed else 0,
-                    notes, datetime.now().isoformat()
-                ))
+                exec_sql(
+                    "INSERT INTO fact_dept_work_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (work_id, dept_id, org_id, None, None, owner_id, title, wtype_id, priority, status,
+                     to_date_id(start_d), to_date_id(due_d), float(progress), risk, 1 if decision_needed else 0,
+                     notes, datetime.now().isoformat())
+                )
                 st.success("บันทึกงานเรียบร้อย")
                 st.rerun()
 
@@ -558,9 +570,12 @@ elif page == "Department Workspace":
         st.info("ยังไม่มีงานของแผนกนี้")
         st.stop()
 
-    st.dataframe(work_df[["work_id","dept_name","work_title","status","progress_percent","risk_level","decision_needed","due_date_id","person_name","last_updated_ts"]], use_container_width=True, hide_index=True)
+    st.dataframe(work_df[["work_id","dept_name","work_title","status","progress_percent","risk_level","decision_needed","due_date_id","person_name","last_updated_ts"]],
+                 use_container_width=True, hide_index=True)
 
-# Meeting module
+# -------------------------
+# Meeting → Action Items (Executive/Admin)
+# -------------------------
 elif page == "Meeting → Action Items":
     st.markdown("## 🗓️ Meeting → Action Items")
     depts = read_df("SELECT * FROM dim_department ORDER BY dept_name")
@@ -573,19 +588,17 @@ elif page == "Meeting → Action Items":
         mt = st.text_input("หัวข้อประชุม *")
         mtype = st.selectbox("ประเภท", ["Committee","Department","Ad-hoc"])
         md = st.date_input("วันที่ประชุม", value=date.today())
-        org = st.selectbox("ผู้จัด/ประธาน", persons["person_name"].tolist() if not persons.empty else ["-"])
+        org_person = st.selectbox("ผู้จัด/ประธาน", persons["person_name"].tolist() if not persons.empty else ["-"])
         minutes = st.text_area("Minutes (ย่อ)", height=120)
         if st.button("บันทึก Meeting", type="primary"):
             if not mt.strip():
                 st.error("กรุณากรอกหัวข้อประชุม")
             else:
                 ensure_dim_date(md, md)
-                org_id_p = None
-                if not persons.empty:
-                    org_id_p = persons.loc[persons["person_name"] == org, "person_id"].iloc[0]
+                organizer_id = persons.loc[persons["person_name"] == org_person, "person_id"].iloc[0] if not persons.empty else None
                 meeting_id = uid("MTG")
                 exec_sql("INSERT INTO fact_meeting VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (meeting_id, to_date_id(md), mt, mtype, org_id_p, minutes, datetime.now().isoformat()))
+                         (meeting_id, to_date_id(md), mt, mtype, organizer_id, minutes, datetime.now().isoformat()))
                 st.success(f"สร้าง Meeting: {meeting_id}")
                 st.rerun()
 
@@ -596,29 +609,27 @@ elif page == "Meeting → Action Items":
         else:
             sel_m = st.selectbox("เลือก Meeting", meetings["meeting_id"].tolist())
             dec = st.text_area("Decision *", height=80)
-            dec_owner = st.selectbox("Decision owner", persons["person_name"].tolist() if not persons.empty else ["-"], key="dec_owner2")
+            dec_owner = st.selectbox("Decision owner", persons["person_name"].tolist() if not persons.empty else ["-"])
             if st.button("เพิ่ม Decision"):
                 if not dec.strip():
                     st.error("กรุณากรอก Decision")
                 else:
-                    owner_id = None
-                    if not persons.empty:
-                        owner_id = persons.loc[persons["person_name"] == dec_owner, "person_id"].iloc[0]
+                    owner_id = persons.loc[persons["person_name"] == dec_owner, "person_id"].iloc[0] if not persons.empty else None
                     decision_id = uid("DEC")
                     exec_sql("INSERT INTO fact_meeting_decision VALUES (?, ?, ?, ?, ?)",
                              (decision_id, sel_m, dec, owner_id, datetime.now().isoformat()))
                     st.success(f"เพิ่ม Decision: {decision_id}")
                     st.rerun()
 
-            decs = read_df("SELECT decision_id, decision_text FROM fact_meeting_decision WHERE meeting_id = ? ORDER BY created_ts DESC", params=(sel_m,))
+            decs = read_df("SELECT decision_id FROM fact_meeting_decision WHERE meeting_id = ? ORDER BY created_ts DESC", params=(sel_m,))
             if not decs.empty:
                 st.markdown("#### Create Action under Decision")
                 sel_d = st.selectbox("เลือก Decision", decs["decision_id"].tolist())
-                a_title = st.text_input("Action item *", key="a_title2")
-                a_dept = st.selectbox("มอบหมายแผนก", depts["dept_name"].tolist() if not depts.empty else ["-"], key="a_dept2")
-                a_owner = st.selectbox("เจ้าภาพ", persons["person_name"].tolist() if not persons.empty else ["-"], key="a_owner2")
-                a_due = st.date_input("กำหนดเสร็จ", value=date.today() + timedelta(days=30), key="a_due2")
-                a_need_dec = st.checkbox("ต้องการการตัดสินใจ", value=False, key="a_need_dec2")
+                a_title = st.text_input("Action item *")
+                a_dept = st.selectbox("มอบหมายแผนก", depts["dept_name"].tolist() if not depts.empty else ["-"])
+                a_owner = st.selectbox("เจ้าภาพ", persons["person_name"].tolist() if not persons.empty else ["-"])
+                a_due = st.date_input("กำหนดเสร็จ", value=date.today() + timedelta(days=30))
+                a_need_dec = st.checkbox("ต้องการการตัดสินใจ", value=False)
                 if st.button("สร้าง Action item", type="primary"):
                     if not a_title.strip():
                         st.error("กรุณากรอก Action item")
@@ -629,7 +640,8 @@ elif page == "Meeting → Action Items":
                         action_id = uid("ACT")
                         exec_sql("INSERT INTO fact_meeting_action_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                  (action_id, sel_m, sel_d, dept_id, owner_id, a_title, "In Progress",
-                                  to_date_id(date.today()), to_date_id(a_due), 0, "", 1 if a_need_dec else 0, None, datetime.now().isoformat()))
+                                  to_date_id(date.today()), to_date_id(a_due), 0, "", 1 if a_need_dec else 0,
+                                  None, datetime.now().isoformat()))
                         st.success(f"สร้าง Action: {action_id}")
                         st.rerun()
 
@@ -646,7 +658,8 @@ elif page == "Meeting → Action Items":
         if actions.empty:
             st.info("ยังไม่มี actions")
         else:
-            st.dataframe(actions[["action_id","meeting_title","dept_name","action_title","status","progress_percent","due_date_id","decision_needed","person_name","linked_work_id"]], use_container_width=True, hide_index=True)
+            st.dataframe(actions[["action_id","meeting_title","dept_name","action_title","status","progress_percent","due_date_id","decision_needed","person_name","linked_work_id"]],
+                         use_container_width=True, hide_index=True)
 
     with tab3:
         st.subheader("Link Action → Work")
@@ -656,7 +669,7 @@ elif page == "Meeting → Action Items":
         else:
             sel = st.selectbox("เลือก action_id", actions["action_id"].tolist())
             arow = actions[actions["action_id"] == sel].iloc[0]
-            if arow["linked_work_id"]:
+            if pd.notna(arow["linked_work_id"]) and str(arow["linked_work_id"]).strip():
                 st.success(f"Linked แล้ว: {arow['linked_work_id']}")
             else:
                 if st.button("สร้าง Work item จาก Action", type="primary"):
@@ -664,58 +677,14 @@ elif page == "Meeting → Action Items":
                         st.error("Action นี้ยังไม่ระบุ dept_id")
                     else:
                         work_id = uid("W")
-                        exec_sql("INSERT INTO fact_dept_work_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                 (work_id, arow["dept_id"], org_id, None, None, arow["owner_person_id"],
-                                  f"[From Meeting] {arow['action_title']}", None, "High", arow["status"],
-                                  arow["start_date_id"], arow["due_date_id"], arow["progress_percent"], "Medium",
-                                  arow["decision_needed"], "Generated from meeting action item", datetime.now().isoformat()))
+                        exec_sql(
+                            "INSERT INTO fact_dept_work_item VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (work_id, arow["dept_id"], org_id, None, None, arow["owner_person_id"],
+                             f"[From Meeting] {arow['action_title']}", None, "High", arow["status"],
+                             arow["start_date_id"], arow["due_date_id"], arow["progress_percent"], "Medium",
+                             arow["decision_needed"], "Generated from meeting action item", datetime.now().isoformat())
+                        )
                         exec_sql("UPDATE fact_meeting_action_item SET linked_work_id = ?, last_updated_ts = ? WHERE action_id = ?",
                                  (work_id, datetime.now().isoformat(), sel))
                         st.success(f"สร้างและ link สำเร็จ: {work_id}")
                         st.rerun()
-
-# Admin pages
-elif page == "Data Import":
-    st.markdown("## ⬆️ Data Import (Admin)")
-    table = st.selectbox("เลือกตาราง", list(TABLE_COLUMNS.keys()))
-    st.download_button(f"Download template: {table}.csv", make_template_csv(table), f"{table}.csv", "text/csv")
-    up = st.file_uploader("Upload CSV", type=["csv"])
-    if up is not None and st.button("Import (Replace Table)", type="primary"):
-        df = pd.read_csv(up)
-        replace_table(table, df)
-        st.success(f"Imported -> {table}")
-        st.rerun()
-
-elif page == "Admin / User Management":
-    st.markdown("## 👤 Admin / User Management")
-    users = read_df("SELECT username, role, dept_id, person_id, is_enabled FROM dim_user ORDER BY username")
-    st.dataframe(users, use_container_width=True, hide_index=True)
-
-    st.subheader("เพิ่มผู้ใช้ใหม่")
-    depts = read_df("SELECT * FROM dim_department ORDER BY dept_name")
-    persons = read_df("SELECT * FROM dim_person ORDER BY person_name")
-    u = st.text_input("username ใหม่", key="newu")
-    pw = st.text_input("password", type="password", key="newpw")
-    role = st.selectbox("role", ["Admin","Executive","DeptHead","Staff"], index=3, key="newrole")
-    dept_id = st.selectbox("dept_id", ["(none)"] + (depts["dept_id"].tolist() if not depts.empty else []), key="newdept")
-    person_id = st.selectbox("person_id", ["(none)"] + (persons["person_id"].tolist() if not persons.empty else []), key="newperson")
-    enabled = st.checkbox("is_enabled", value=True, key="newen")
-    if st.button("สร้างผู้ใช้", type="primary"):
-        if not u.strip() or not pw:
-            st.error("กรุณากรอก username และ password")
-        else:
-            exec_sql("INSERT OR REPLACE INTO dim_user VALUES (?, ?, ?, ?, ?, ?)",
-                     (u.strip(), sha256(pw), role,
-                      None if dept_id == "(none)" else dept_id,
-                      None if person_id == "(none)" else person_id,
-                      1 if enabled else 0))
-            st.success("สร้าง/อัปเดตผู้ใช้เรียบร้อย")
-            st.rerun()
-
-else:
-    st.markdown("## 🧾 Schema / Templates")
-    for t, cols in TABLE_COLUMNS.items():
-        with st.expander(t):
-            st.code(", ".join(cols))
-    st.markdown("### RBAC")
-    st.markdown("- Admin: ทุกหน้า\n- Executive: Executive + Meeting\n- DeptHead/Staff: Department Workspace (เฉพาะแผนกตน)")
