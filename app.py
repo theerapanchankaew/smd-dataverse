@@ -4,22 +4,26 @@ import plotly.express as px
 import sqlite3
 from pathlib import Path
 from datetime import datetime, date, timedelta
+import uuid
+import os
 
 # =========================================================
-# MASCI Intelligence Hub (MVP) - Clean Streamlit App
-# - SQLite embedded DB (good for PoC / demo on Streamlit Cloud)
-# - Physical tables: dim_* + fact_* (replace-table import via CSV)
-# - Executive View: 1-page dashboard (health, execution, risk, signals, actions)
+# Intelligence Hub (MVP+) - Department Work Management
+# - Adds: departments contribute their responsible work items into the hub
+# - Keeps: Executive View (1 page) + CSV Import
+# - Storage: SQLite embedded DB (PoC / Streamlit Cloud demo)
 # =========================================================
 
 st.set_page_config(
-    page_title="Intelligence Hub (MVP)",
+    page_title="Intelligence Hub (MVP+)",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 DB_PATH = Path("intelligence_hub.db")
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 # -------------------------
 # DB helpers
@@ -98,7 +102,23 @@ def init_db() -> None:
     )
     """)
 
-    # Facts
+    # NEW: Department + Work Type
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_department (
+        dept_id TEXT PRIMARY KEY,
+        dept_name TEXT NOT NULL,
+        dept_head_person_id TEXT,
+        description TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS dim_work_type (
+        work_type_id TEXT PRIMARY KEY,
+        work_type_name TEXT NOT NULL
+    )
+    """)
+
+    # Facts (original)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS fact_strategic_kpi (
         kpi_fact_id TEXT PRIMARY KEY,
@@ -156,6 +176,52 @@ def init_db() -> None:
     )
     """)
 
+    # NEW: Department Work Items + Updates + Evidence
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_dept_work_item (
+        work_id TEXT PRIMARY KEY,
+        dept_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        strategy_id TEXT,
+        kpi_id TEXT,
+        owner_person_id TEXT,
+        work_title TEXT NOT NULL,
+        work_type_id TEXT,
+        priority TEXT,
+        status TEXT,
+        start_date_id INTEGER,
+        due_date_id INTEGER,
+        progress_percent REAL,
+        risk_level TEXT,
+        decision_needed INTEGER,
+        notes TEXT,
+        last_updated_ts TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_work_update (
+        update_id TEXT PRIMARY KEY,
+        work_id TEXT NOT NULL,
+        date_id INTEGER NOT NULL,
+        progress_percent REAL,
+        update_text TEXT,
+        blockers TEXT,
+        decision_needed INTEGER,
+        created_ts TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS fact_work_evidence (
+        evidence_id TEXT PRIMARY KEY,
+        work_id TEXT NOT NULL,
+        date_id INTEGER NOT NULL,
+        file_name TEXT NOT NULL,
+        stored_path TEXT NOT NULL,
+        note TEXT,
+        uploaded_ts TEXT
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -167,6 +233,18 @@ def read_df(sql: str) -> pd.DataFrame:
         conn.close()
     return df
 
+def exec_sql(sql: str, params=None) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if params is None:
+            cur.execute(sql)
+        else:
+            cur.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
 def replace_table(table: str, df: pd.DataFrame) -> None:
     conn = get_conn()
     try:
@@ -175,7 +253,6 @@ def replace_table(table: str, df: pd.DataFrame) -> None:
         conn.close()
 
 def ensure_dim_date(start: date, end: date) -> None:
-    """Create dim_date rows for [start, end] inclusive. date_id = YYYYMMDD."""
     conn = get_conn()
     cur = conn.cursor()
     d = start
@@ -185,12 +262,18 @@ def ensure_dim_date(start: date, end: date) -> None:
             INSERT OR IGNORE INTO dim_date(date_id, date, month, quarter, year)
             VALUES (?, ?, ?, ?, ?)
         """, (date_id, d.isoformat(), d.month, (d.month - 1)//3 + 1, d.year))
-        d = d + timedelta(days=1)
+        d += timedelta(days=1)
     conn.commit()
     conn.close()
 
+def to_date_id(d: date) -> int:
+    return int(d.strftime("%Y%m%d"))
+
+def uid(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
 # -------------------------
-# Demo seed + templates
+# Templates (for CSV import)
 # -------------------------
 TABLE_COLUMNS = {
     "dim_strategy": ["strategy_id","strategy_name","strategy_owner","strategy_level","start_year","end_year"],
@@ -200,96 +283,85 @@ TABLE_COLUMNS = {
     "dim_risk_category": ["risk_category_id","risk_category_name","governance_area"],
     "dim_source": ["source_id","source_type","source_name"],
     "dim_topic": ["topic_id","topic_name"],
+    "dim_department": ["dept_id","dept_name","dept_head_person_id","description"],
+    "dim_work_type": ["work_type_id","work_type_name"],
     "fact_strategic_kpi": ["kpi_fact_id","date_id","strategy_id","organization_id","kpi_id","actual_value","target_value","variance_value","kpi_status","last_updated_ts"],
     "fact_strategy_project": ["project_fact_id","strategy_id","project_name","owner_person_id","start_date_id","end_date_id","progress_percent","budget_plan","budget_used","project_status","risk_level"],
     "fact_risk_event": ["risk_event_id","date_id","organization_id","risk_category_id","risk_description","likelihood_score","impact_score","risk_score","mitigation_plan","mitigation_status"],
     "fact_external_signal": ["signal_id","date_id","source_id","topic_id","signal_type","relevance_score","sentiment_score","linked_strategy_id"],
+    "fact_dept_work_item": ["work_id","dept_id","organization_id","strategy_id","kpi_id","owner_person_id","work_title","work_type_id","priority","status","start_date_id","due_date_id","progress_percent","risk_level","decision_needed","notes","last_updated_ts"],
+    "fact_work_update": ["update_id","work_id","date_id","progress_percent","update_text","blockers","decision_needed","created_ts"],
+    "fact_work_evidence": ["evidence_id","work_id","date_id","file_name","stored_path","note","uploaded_ts"],
 }
 
 def make_template_csv(table: str) -> bytes:
     df = pd.DataFrame(columns=TABLE_COLUMNS[table])
     return df.to_csv(index=False).encode("utf-8")
 
+# -------------------------
+# Demo seed
+# -------------------------
 def seed_demo_data() -> None:
     today = date.today()
-    ensure_dim_date(today - timedelta(days=120), today)
+    ensure_dim_date(today - timedelta(days=180), today)
 
-    dim_strategy = pd.DataFrame([
+    # Minimal org
+    replace_table("dim_organization", pd.DataFrame([{
+        "organization_id":"ORG1","organization_name":"MASCI (HQ)","org_type":"Foundation","sector":"Certification"
+    }]))
+
+    replace_table("dim_strategy", pd.DataFrame([
         {"strategy_id":"S1","strategy_name":"ยกระดับคุณภาพบริการรับรอง","strategy_owner":"Director","strategy_level":"องค์กร","start_year":2026,"end_year":2028},
         {"strategy_id":"S2","strategy_name":"Digital Transformation","strategy_owner":"Director","strategy_level":"องค์กร","start_year":2026,"end_year":2028},
         {"strategy_id":"S3","strategy_name":"การบริหารความเสี่ยง/ธรรมาภิบาล","strategy_owner":"Director","strategy_level":"องค์กร","start_year":2026,"end_year":2028},
-    ])
-    dim_kpi = pd.DataFrame([
+    ]))
+
+    replace_table("dim_kpi", pd.DataFrame([
         {"kpi_id":"K1","kpi_name":"On-time Delivery","kpi_definition":"งานส่งมอบตามกำหนด","calculation_logic":"on_time/total","kpi_owner":"Strategy","refresh_frequency":"Weekly"},
         {"kpi_id":"K2","kpi_name":"Customer Satisfaction","kpi_definition":"ความพึงพอใจลูกค้า","calculation_logic":"avg_score","kpi_owner":"Strategy","refresh_frequency":"Monthly"},
         {"kpi_id":"K3","kpi_name":"Compliance Findings","kpi_definition":"ประเด็นไม่สอดคล้อง","calculation_logic":"count(findings)","kpi_owner":"Governance","refresh_frequency":"Monthly"},
-        {"kpi_id":"K4","kpi_name":"Digital Project Progress","kpi_definition":"ความคืบหน้าโครงการดิจิทัล","calculation_logic":"avg(progress)","kpi_owner":"IT/Strategy","refresh_frequency":"Weekly"},
-        {"kpi_id":"K5","kpi_name":"Revenue Pipeline","kpi_definition":"แนวโน้มรายได้","calculation_logic":"sum(pipeline)","kpi_owner":"Finance","refresh_frequency":"Weekly"},
-    ])
-    dim_org = pd.DataFrame([
-        {"organization_id":"ORG1","organization_name":"MASCI (HQ)","org_type":"Foundation","sector":"Certification"},
-    ])
-    dim_person = pd.DataFrame([
-        {"person_id":"P1","person_name":"Owner A","role":"Project Owner","department":"Strategy"},
-        {"person_id":"P2","person_name":"Owner B","role":"Project Owner","department":"IT"},
-    ])
-    dim_risk_cat = pd.DataFrame([
-        {"risk_category_id":"R1","risk_category_name":"Operational","governance_area":"Operations"},
-        {"risk_category_id":"R2","risk_category_name":"Compliance","governance_area":"Governance"},
-        {"risk_category_id":"R3","risk_category_name":"Strategic","governance_area":"Strategy"},
-    ])
-    dim_source = pd.DataFrame([
-        {"source_id":"SRC1","source_type":"External","source_name":"Regulator"},
-        {"source_id":"SRC2","source_type":"External","source_name":"Market"},
-    ])
-    dim_topic = pd.DataFrame([
-        {"topic_id":"T1","topic_name":"Regulation"},
-        {"topic_id":"T2","topic_name":"Market Trend"},
-        {"topic_id":"T3","topic_name":"Technology"},
-    ])
+    ]))
 
-    replace_table("dim_strategy", dim_strategy)
-    replace_table("dim_kpi", dim_kpi)
-    replace_table("dim_organization", dim_org)
-    replace_table("dim_person", dim_person)
-    replace_table("dim_risk_category", dim_risk_cat)
-    replace_table("dim_source", dim_source)
-    replace_table("dim_topic", dim_topic)
+    replace_table("dim_person", pd.DataFrame([
+        {"person_id":"P1","person_name":"Owner A","role":"Manager","department":"Strategy"},
+        {"person_id":"P2","person_name":"Owner B","role":"Manager","department":"Operations"},
+        {"person_id":"P3","person_name":"Owner C","role":"Manager","department":"Governance"},
+    ]))
 
-    d0 = int(today.strftime("%Y%m%d"))
-    d1 = int((today - timedelta(days=30)).strftime("%Y%m%d"))
+    replace_table("dim_department", pd.DataFrame([
+        {"dept_id":"D1","dept_name":"Operations","dept_head_person_id":"P2","description":"งานปฏิบัติการ/บริการ"},
+        {"dept_id":"D2","dept_name":"Strategy","dept_head_person_id":"P1","description":"งานยุทธศาสตร์/แผน"},
+        {"dept_id":"D3","dept_name":"Governance","dept_head_person_id":"P3","description":"งานกำกับดูแล/ความเสี่ยง"},
+    ]))
 
-    fact_kpi = pd.DataFrame([
+    replace_table("dim_work_type", pd.DataFrame([
+        {"work_type_id":"WT1","work_type_name":"Routine"},
+        {"work_type_id":"WT2","work_type_name":"Project"},
+        {"work_type_id":"WT3","work_type_name":"Improvement"},
+        {"work_type_id":"WT4","work_type_name":"Risk Mitigation"},
+    ]))
+
+    d0 = to_date_id(today)
+
+    replace_table("fact_strategic_kpi", pd.DataFrame([
         {"kpi_fact_id":"F_KPI_1","date_id":d0,"strategy_id":"S1","organization_id":"ORG1","kpi_id":"K1","actual_value":0.91,"target_value":0.95,"variance_value":-0.04,"kpi_status":"Amber","last_updated_ts":datetime.now().isoformat()},
-        {"kpi_fact_id":"F_KPI_2","date_id":d0,"strategy_id":"S1","organization_id":"ORG1","kpi_id":"K2","actual_value":4.2,"target_value":4.5,"variance_value":-0.3,"kpi_status":"Amber","last_updated_ts":datetime.now().isoformat()},
-        {"kpi_fact_id":"F_KPI_3","date_id":d0,"strategy_id":"S3","organization_id":"ORG1","kpi_id":"K3","actual_value":12,"target_value":8,"variance_value":4,"kpi_status":"Red","last_updated_ts":datetime.now().isoformat()},
-        {"kpi_fact_id":"F_KPI_4","date_id":d0,"strategy_id":"S2","organization_id":"ORG1","kpi_id":"K4","actual_value":0.55,"target_value":0.60,"variance_value":-0.05,"kpi_status":"Amber","last_updated_ts":datetime.now().isoformat()},
-        {"kpi_fact_id":"F_KPI_5","date_id":d0,"strategy_id":"S1","organization_id":"ORG1","kpi_id":"K5","actual_value":32.0,"target_value":30.0,"variance_value":2.0,"kpi_status":"Green","last_updated_ts":datetime.now().isoformat()},
-    ])
-    replace_table("fact_strategic_kpi", fact_kpi)
+        {"kpi_fact_id":"F_KPI_2","date_id":d0,"strategy_id":"S3","organization_id":"ORG1","kpi_id":"K3","actual_value":12,"target_value":8,"variance_value":4,"kpi_status":"Red","last_updated_ts":datetime.now().isoformat()},
+    ]))
 
-    fact_proj = pd.DataFrame([
-        {"project_fact_id":"PRJ_1","strategy_id":"S2","project_name":"Data Catalog & KPI Dictionary","owner_person_id":"P1","start_date_id":d1,"end_date_id":d0,"progress_percent":65,"budget_plan":800000,"budget_used":520000,"project_status":"In Progress","risk_level":"Medium"},
-        {"project_fact_id":"PRJ_2","strategy_id":"S2","project_name":"Executive Dashboard v1","owner_person_id":"P2","start_date_id":d1,"end_date_id":d0,"progress_percent":45,"budget_plan":600000,"budget_used":300000,"project_status":"In Progress","risk_level":"High"},
-    ])
-    replace_table("fact_strategy_project", fact_proj)
-
-    fact_risk = pd.DataFrame([
-        {"risk_event_id":"RSK_1","date_id":d0,"organization_id":"ORG1","risk_category_id":"R2","risk_description":"เอกสารหลักฐานไม่ครบตามรอบ","likelihood_score":4,"impact_score":4,"risk_score":16,"mitigation_plan":"ทำ checklist + training","mitigation_status":"Open"},
-        {"risk_event_id":"RSK_2","date_id":d0,"organization_id":"ORG1","risk_category_id":"R1","risk_description":"ทรัพยากรผู้ตรวจไม่พอใน peak season","likelihood_score":3,"impact_score":5,"risk_score":15,"mitigation_plan":"ปรับแผน capacity","mitigation_status":"In Progress"},
-        {"risk_event_id":"RSK_3","date_id":d0,"organization_id":"ORG1","risk_category_id":"R3","risk_description":"การเปลี่ยนแปลงข้อกำหนดภายนอกกระทบ scope","likelihood_score":3,"impact_score":4,"risk_score":12,"mitigation_plan":"ติดตามประกาศ + gap review","mitigation_status":"Open"},
-    ])
-    replace_table("fact_risk_event", fact_risk)
-
-    fact_signal = pd.DataFrame([
-        {"signal_id":"SIG_1","date_id":d0,"source_id":"SRC1","topic_id":"T1","signal_type":"Risk","relevance_score":0.9,"sentiment_score":-0.4,"linked_strategy_id":"S3"},
-        {"signal_id":"SIG_2","date_id":d0,"source_id":"SRC2","topic_id":"T2","signal_type":"Opportunity","relevance_score":0.7,"sentiment_score":0.2,"linked_strategy_id":"S1"},
-        {"signal_id":"SIG_3","date_id":d0,"source_id":"SRC2","topic_id":"T3","signal_type":"Opportunity","relevance_score":0.8,"sentiment_score":0.4,"linked_strategy_id":"S2"},
-    ])
-    replace_table("fact_external_signal", fact_signal)
+    # Dept work items
+    replace_table("fact_dept_work_item", pd.DataFrame([
+        {"work_id":"W1","dept_id":"D1","organization_id":"ORG1","strategy_id":"S1","kpi_id":"K1","owner_person_id":"P2",
+         "work_title":"ลดงานส่งมอบล่าช้า (ปรับ workflow + checklist)","work_type_id":"WT3","priority":"High","status":"In Progress",
+         "start_date_id":d0-30,"due_date_id":d0+30,"progress_percent":55,"risk_level":"Medium","decision_needed":0,
+         "notes":"ทดลองใช้ checklist 2 ทีม","last_updated_ts":datetime.now().isoformat()},
+        {"work_id":"W2","dept_id":"D3","organization_id":"ORG1","strategy_id":"S3","kpi_id":"K3","owner_person_id":"P3",
+         "work_title":"ปิดประเด็น compliance findings ตามรอบ","work_type_id":"WT4","priority":"High","status":"At Risk",
+         "start_date_id":d0-14,"due_date_id":d0+14,"progress_percent":25,"risk_level":"High","decision_needed":1,
+         "notes":"ต้องการทรัพยากรตรวจทวนเอกสารเพิ่ม","last_updated_ts":datetime.now().isoformat()},
+    ]))
 
 # -------------------------
-# Load for Executive View
+# Executive data loaders
 # -------------------------
 def load_exec_data(as_of_id: int, org_id: str):
     kpi = read_df(f"""
@@ -321,53 +393,54 @@ def load_exec_data(as_of_id: int, org_id: str):
         LEFT JOIN dim_strategy s ON e.linked_strategy_id = s.strategy_id
         WHERE e.date_id = {as_of_id}
     """)
-    return kpi, projects, risks, signals
+    dept_work = read_df(f"""
+        SELECT w.*, d.dept_name, p.person_name, s.strategy_name, k.kpi_name, wt.work_type_name
+        FROM fact_dept_work_item w
+        LEFT JOIN dim_department d ON w.dept_id = d.dept_id
+        LEFT JOIN dim_person p ON w.owner_person_id = p.person_id
+        LEFT JOIN dim_strategy s ON w.strategy_id = s.strategy_id
+        LEFT JOIN dim_kpi k ON w.kpi_id = k.kpi_id
+        LEFT JOIN dim_work_type wt ON w.work_type_id = wt.work_type_id
+        WHERE w.organization_id = '{org_id}'
+    """)
+    return kpi, projects, risks, signals, dept_work
 
 # -------------------------
-# App
+# App start
 # -------------------------
 init_db()
 
 with st.sidebar:
     st.title("🧠 Intelligence Hub")
-    st.caption("MVP (Clean) • Strategy • Risk • Signals")
+    st.caption("MVP+ • Executive + Department Work")
     st.divider()
 
-    page = st.radio("เมนู", ["Executive View", "Data Import", "Schema / Templates"], index=0)
+    page = st.radio("เมนู", ["Executive View", "Department Workspace", "Data Import", "Schema / Templates"], index=0)
 
     st.divider()
     st.markdown("### As-of & Filters")
     as_of_txt = st.text_input("As-of date_id (YYYYMMDD)", value=date.today().strftime("%Y%m%d"))
     org_id = st.text_input("organization_id", value="ORG1")
-
     try:
         as_of_id = int(as_of_txt)
     except:
         as_of_id = int(date.today().strftime("%Y%m%d"))
 
-# =========================
+# -------------------------
 # Page: Executive View
-# =========================
+# -------------------------
 if page == "Executive View":
     st.markdown("## 📌 Executive View (1 หน้า)")
-    st.caption("เปิดแล้วต้องรู้: สุขภาพองค์กร / ความคืบหน้า / ความเสี่ยง / สัญญาณภายนอก / สิ่งที่ต้องตัดสินใจ")
+    st.caption("รวม KPI / โครงการ / ความเสี่ยง / สัญญาณภายนอก + งานรับผิดชอบจากแต่ละแผนก")
 
-    kpi, projects, risks, signals = load_exec_data(as_of_id, org_id)
-
-    top = st.columns([1,1,1,1,1])
-    with top[0]:
+    c = st.columns([1,4,4,4,4])
+    with c[0]:
         if st.button("🌱 Seed Demo Data"):
             seed_demo_data()
             st.success("Seed demo data เรียบร้อย")
             st.rerun()
-    with top[1]:
-        st.write("")
-    with top[2]:
-        st.write("")
-    with top[3]:
-        st.write("")
-    with top[4]:
-        st.write("")
+
+    kpi, projects, risks, signals, dept_work = load_exec_data(as_of_id, org_id)
 
     # Health snapshot
     c1, c2, c3, c4 = st.columns(4)
@@ -378,7 +451,6 @@ if page == "Executive View":
         total = int(len(kpi))
     else:
         green = amber = red = total = 0
-
     c1.metric("KPI (ทั้งหมด)", total)
     c2.metric("Green", green)
     c3.metric("Amber", amber)
@@ -392,156 +464,243 @@ if page == "Executive View":
         else:
             st.dataframe(
                 kpi[["kpi_name","strategy_name","actual_value","target_value","variance_value","kpi_status"]],
-                use_container_width=True,
-                hide_index=True
+                use_container_width=True, hide_index=True
             )
     with colB:
         st.markdown("### KPI Status Distribution")
         if total > 0:
-            fig = px.pie(
-                pd.DataFrame({"status":["Green","Amber","Red"], "count":[green, amber, red]}),
-                values="count",
-                names="status",
-            )
+            fig = px.pie(pd.DataFrame({"status":["Green","Amber","Red"], "count":[green, amber, red]}),
+                         values="count", names="status")
             fig.update_layout(height=300, margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
 
-    # Execution
-    st.markdown("### 2) Strategy Execution Status")
-    left, right = st.columns([1.2, 1])
-    with left:
-        if projects.empty:
-            st.info("ยังไม่มีข้อมูล fact_strategy_project")
-        else:
-            st.dataframe(
-                projects[["project_name","strategy_name","person_name","progress_percent","project_status","risk_level","budget_plan","budget_used"]],
-                use_container_width=True,
-                hide_index=True
-            )
-    with right:
-        if not projects.empty:
-            figp = px.bar(projects, x="project_name", y="progress_percent")
-            figp.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10), yaxis=dict(range=[0, 100]))
-            st.plotly_chart(figp, use_container_width=True)
-
-    st.divider()
-
-    # Risk
-    st.markdown("### 3) Risk & Governance Radar")
-    r1, r2 = st.columns([1.1, 1])
-    with r1:
-        if risks.empty:
-            st.info("ยังไม่มีข้อมูล fact_risk_event")
-        else:
-            # Scatter: likelihood vs impact, bubble = risk_score
-            fig_risk = px.scatter(
-                risks,
-                x="likelihood_score",
-                y="impact_score",
-                size="risk_score",
-                hover_data=["risk_category_name","risk_description","mitigation_status","risk_score"],
-            )
-            fig_risk.update_layout(
-                height=360,
-                xaxis=dict(range=[0, 5]),
-                yaxis=dict(range=[0, 5]),
-                margin=dict(l=10,r=10,t=10,b=10),
-            )
-            st.plotly_chart(fig_risk, use_container_width=True)
-
-    with r2:
-        if not risks.empty:
-            open_cnt = int(risks["mitigation_status"].isin(["Open", "In Progress"]).sum())
-            st.metric("Risks ที่ยังเปิดอยู่", open_cnt)
-            st.markdown("**Top Risks (คะแนนสูงสุด)**")
-            top_r = risks.sort_values("risk_score", ascending=False).head(3)
-            st.dataframe(
-                top_r[["risk_category_name","risk_description","risk_score","mitigation_status"]],
-                use_container_width=True,
-                hide_index=True
-            )
-
-    st.divider()
-
-    # Signals
-    st.markdown("### 4) External Intelligence Signals")
-    s1, s2 = st.columns([1.3, 1])
-    with s1:
-        if signals.empty:
-            st.info("ยังไม่มีข้อมูล fact_external_signal")
-        else:
-            st.dataframe(
-                signals[["topic_name","signal_type","relevance_score","sentiment_score","source_name","strategy_name"]],
-                use_container_width=True,
-                hide_index=True
-            )
-    with s2:
-        if not signals.empty:
-            figs = px.scatter(
-                signals,
-                x="relevance_score",
-                y="sentiment_score",
-                color="signal_type",
-                hover_data=["topic_name","source_name","strategy_name"]
-            )
-            figs.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(figs, use_container_width=True)
+    # Department Work snapshot (NEW)
+    st.markdown("### 2) Department Work Snapshot")
+    if dept_work.empty:
+        st.info("ยังไม่มีงานจากแผนก → ไปที่ Department Workspace เพื่อบันทึกงานรับผิดชอบ")
+    else:
+        a, b = st.columns([1.4, 1])
+        with a:
+            show_cols = ["dept_name","work_title","work_type_name","priority","status","progress_percent","risk_level","decision_needed","person_name","due_date_id"]
+            st.dataframe(dept_work[show_cols].sort_values(["risk_level","priority"], ascending=[False, False]),
+                         use_container_width=True, hide_index=True)
+        with b:
+            fig2 = px.bar(dept_work, x="dept_name", y="work_id", color="status", barmode="group")
+            fig2.update_layout(height=320, margin=dict(l=10,r=10,t=10,b=10), yaxis_title="จำนวนงาน")
+            st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
 
     # Action panel
-    st.markdown("### 5) Executive Action Panel (สิ่งที่ต้องตัดสินใจ)")
+    st.markdown("### 3) Executive Action Panel (สิ่งที่ต้องตัดสินใจ)")
     action_items = []
 
     if not kpi.empty:
         for _, row in kpi[kpi["kpi_status"] == "Red"].iterrows():
-            action_items.append(
-                f"⚠️ KPI แดง: **{row['kpi_name']}** ({row['strategy_name']}) → ขอแผนแก้ไข/เจ้าภาพ/เส้นตาย"
-            )
+            action_items.append(f"⚠️ KPI แดง: **{row['kpi_name']}** ({row['strategy_name']}) → ขอแผนแก้ไข/เจ้าภาพ/เส้นตาย")
 
-    if not projects.empty:
-        high = projects[projects["risk_level"].isin(["High","สูง","H"])]
-        for _, row in high.iterrows():
-            action_items.append(
-                f"🚧 โครงการเสี่ยงสูง: **{row['project_name']}** → ขอผู้บริหารกำหนดแนวทาง/ทรัพยากร"
-            )
+    if not dept_work.empty:
+        # Decision needed by dept
+        need_decision = dept_work[dept_work["decision_needed"].fillna(0).astype(int) == 1]
+        for _, row in need_decision.head(8).iterrows():
+            action_items.append(f"🧩 ต้องการการตัดสินใจ: **{row['dept_name']}** — {row['work_title']} (เจ้าภาพ: {row.get('person_name','-')})")
 
-    if not risks.empty:
-        critical = risks[risks["risk_score"] >= 15]
-        for _, row in critical.iterrows():
-            action_items.append(
-                f"🔥 Risk สูง: **{row['risk_category_name']}** (score {row['risk_score']}) → {row['mitigation_status']}"
-            )
+        # Overdue rule (simple): due_date_id < as_of_id and status not Done/Closed
+        dw = dept_work.copy()
+        dw["due_date_id"] = pd.to_numeric(dw["due_date_id"], errors="coerce")
+        overdue = dw[(dw["due_date_id"].notna()) & (dw["due_date_id"] < as_of_id) & (~dw["status"].isin(["Done","Closed","Completed"]))]
 
-    if not signals.empty:
-        high_rel = signals[signals["relevance_score"] >= 0.85]
-        for _, row in high_rel.iterrows():
-            action_items.append(
-                f"📣 Signal สำคัญ: **{row['topic_name']}** ({row['signal_type']}) กระทบ {row['strategy_name']}"
-            )
+        for _, row in overdue.head(8).iterrows():
+            action_items.append(f"⏰ งานเกินกำหนด: **{row['dept_name']}** — {row['work_title']} (due {int(row['due_date_id'])})")
+
+        # High risk
+        high_risk = dept_work[dept_work["risk_level"].isin(["High","สูง","H"])]
+        for _, row in high_risk.head(6).iterrows():
+            action_items.append(f"🔥 งานเสี่ยงสูง: **{row['dept_name']}** — {row['work_title']} (progress {row['progress_percent']}%)")
 
     if not action_items:
-        st.success("ไม่มีประเด็นเร่งด่วน (หรือยังไม่มีข้อมูล) — ลอง Seed/Import แล้วรีเฟรช")
+        st.success("ยังไม่มีประเด็นเร่งด่วน (หรือยังไม่มีข้อมูล)")
     else:
-        for a in action_items[:12]:
+        for a in action_items[:15]:
             st.write(a)
 
-    with st.expander("🔎 Data Workbench"):
-        t1, t2, t3, t4 = st.tabs(["KPI Facts", "Projects", "Risks", "Signals"])
-        with t1:
-            st.dataframe(kpi, use_container_width=True)
-        with t2:
-            st.dataframe(projects, use_container_width=True)
-        with t3:
-            st.dataframe(risks, use_container_width=True)
-        with t4:
-            st.dataframe(signals, use_container_width=True)
+# -------------------------
+# Page: Department Workspace
+# -------------------------
+elif page == "Department Workspace":
+    st.markdown("## 🧩 Department Workspace")
+    st.caption("ให้แต่ละแผนกบันทึก “งานรับผิดชอบ” + อัปเดตความคืบหน้า + แนบหลักฐาน เพื่อให้ผู้บริหารเห็นภาพรวมเดียวกัน")
 
-# =========================
+    depts = read_df("SELECT * FROM dim_department ORDER BY dept_name")
+    persons = read_df("SELECT * FROM dim_person ORDER BY person_name")
+    strategies = read_df("SELECT * FROM dim_strategy ORDER BY strategy_name")
+    kpis = read_df("SELECT * FROM dim_kpi ORDER BY kpi_name")
+    wtypes = read_df("SELECT * FROM dim_work_type ORDER BY work_type_name")
+
+    if depts.empty:
+        st.warning("ยังไม่มี dim_department — แนะนำ Import หรือ Seed Demo Data ก่อน")
+    else:
+        dept_label = st.selectbox("เลือกแผนก", depts["dept_name"].tolist())
+        dept_id = depts.loc[depts["dept_name"] == dept_label, "dept_id"].iloc[0]
+
+        # KPIs / strategy optional link
+        with st.expander("➕ เพิ่มงานรับผิดชอบใหม่", expanded=True):
+            c1, c2, c3 = st.columns([1.2, 1, 1])
+            with c1:
+                work_title = st.text_input("ชื่องาน/ภารกิจ *", placeholder="เช่น ปรับปรุงกระบวนการตรวจทานเอกสารก่อนออกใบรับรอง")
+                work_type = st.selectbox("ประเภทงาน", (wtypes["work_type_name"].tolist() if not wtypes.empty else ["Routine","Project","Improvement","Risk Mitigation"]))
+                priority = st.selectbox("ความสำคัญ", ["High","Medium","Low"], index=0)
+                status = st.selectbox("สถานะ", ["Planned","In Progress","At Risk","Done"], index=1)
+            with c2:
+                owner = st.selectbox("เจ้าภาพ", (persons["person_name"].tolist() if not persons.empty else ["-"]))
+                risk_level = st.selectbox("ระดับความเสี่ยง", ["Low","Medium","High"], index=1)
+                decision_needed = st.checkbox("ต้องการการตัดสินใจจากผู้บริหาร", value=False)
+                progress = st.slider("ความคืบหน้า (%)", 0, 100, 0)
+            with c3:
+                start_d = st.date_input("วันเริ่ม", value=date.today())
+                due_d = st.date_input("กำหนดเสร็จ", value=date.today() + timedelta(days=30))
+                strategy_opt = st.selectbox("เชื่อมยุทธศาสตร์ (ถ้ามี)", (["(ไม่ระบุ)"] + (strategies["strategy_name"].tolist() if not strategies.empty else [])))
+                kpi_opt = st.selectbox("เชื่อม KPI (ถ้ามี)", (["(ไม่ระบุ)"] + (kpis["kpi_name"].tolist() if not kpis.empty else [])))
+                notes = st.text_area("หมายเหตุ", height=90)
+
+            if st.button("บันทึกงาน", type="primary"):
+                if not work_title.strip():
+                    st.error("กรุณากรอกชื่องาน/ภารกิจ")
+                else:
+                    ensure_dim_date(start_d, due_d)
+
+                    work_type_id = None
+                    if not wtypes.empty and work_type in wtypes["work_type_name"].tolist():
+                        work_type_id = wtypes.loc[wtypes["work_type_name"] == work_type, "work_type_id"].iloc[0]
+
+                    owner_person_id = None
+                    if not persons.empty and owner in persons["person_name"].tolist():
+                        owner_person_id = persons.loc[persons["person_name"] == owner, "person_id"].iloc[0]
+
+                    strategy_id = None
+                    if strategy_opt != "(ไม่ระบุ)" and not strategies.empty:
+                        strategy_id = strategies.loc[strategies["strategy_name"] == strategy_opt, "strategy_id"].iloc[0]
+
+                    kpi_id = None
+                    if kpi_opt != "(ไม่ระบุ)" and not kpis.empty:
+                        kpi_id = kpis.loc[kpis["kpi_name"] == kpi_opt, "kpi_id"].iloc[0]
+
+                    work_id = uid("W")
+                    exec_sql("""
+                        INSERT INTO fact_dept_work_item(
+                            work_id, dept_id, organization_id, strategy_id, kpi_id, owner_person_id,
+                            work_title, work_type_id, priority, status, start_date_id, due_date_id,
+                            progress_percent, risk_level, decision_needed, notes, last_updated_ts
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        work_id, dept_id, org_id, strategy_id, kpi_id, owner_person_id,
+                        work_title, work_type_id, priority, status, to_date_id(start_d), to_date_id(due_d),
+                        float(progress), risk_level, 1 if decision_needed else 0, notes, datetime.now().isoformat()
+                    ))
+                    st.success("บันทึกงานเรียบร้อย")
+                    st.rerun()
+
+        st.divider()
+
+        st.markdown("### 📋 งานของแผนก")
+        work_df = read_df(f"""
+            SELECT w.*, p.person_name, wt.work_type_name, s.strategy_name, k.kpi_name
+            FROM fact_dept_work_item w
+            LEFT JOIN dim_person p ON w.owner_person_id = p.person_id
+            LEFT JOIN dim_work_type wt ON w.work_type_id = wt.work_type_id
+            LEFT JOIN dim_strategy s ON w.strategy_id = s.strategy_id
+            LEFT JOIN dim_kpi k ON w.kpi_id = k.kpi_id
+            WHERE w.dept_id = '{dept_id}'
+              AND w.organization_id = '{org_id}'
+            ORDER BY w.last_updated_ts DESC
+        """)
+
+        if work_df.empty:
+            st.info("ยังไม่มีงานของแผนกนี้")
+        else:
+            st.dataframe(
+                work_df[["work_id","work_title","work_type_name","priority","status","progress_percent","risk_level","decision_needed","person_name","due_date_id","last_updated_ts"]],
+                use_container_width=True, hide_index=True
+            )
+
+            st.markdown("### 🔄 อัปเดตความคืบหน้า / แนบหลักฐาน")
+            selected_work = st.selectbox("เลือก work_id เพื่ออัปเดต/แนบหลักฐาน", work_df["work_id"].tolist())
+            wrow = work_df[work_df["work_id"] == selected_work].iloc[0]
+
+            u1, u2 = st.columns([1.2, 1])
+            with u1:
+                with st.form("update_form", clear_on_submit=True):
+                    upd_progress = st.slider("ความคืบหน้าล่าสุด (%)", 0, 100, int(wrow["progress_percent"] if pd.notna(wrow["progress_percent"]) else 0))
+                    upd_text = st.text_area("Update", placeholder="สิ่งที่ทำไป/ผลลัพธ์/ประเด็นสำคัญ")
+                    blockers = st.text_area("Blockers", placeholder="อุปสรรค/สิ่งที่ติดขัด (ถ้ามี)")
+                    dec_need = st.checkbox("ต้องการการตัดสินใจ", value=bool(int(wrow["decision_needed"]) if pd.notna(wrow["decision_needed"]) else 0))
+                    if st.form_submit_button("บันทึก Update"):
+                        today = date.today()
+                        ensure_dim_date(today, today)
+                        exec_sql("""
+                            INSERT INTO fact_work_update(update_id, work_id, date_id, progress_percent, update_text, blockers, decision_needed, created_ts)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            uid("UPD"), selected_work, to_date_id(today), float(upd_progress), upd_text, blockers, 1 if dec_need else 0, datetime.now().isoformat()
+                        ))
+                        # also update main work item
+                        exec_sql("""
+                            UPDATE fact_dept_work_item
+                            SET progress_percent = ?, decision_needed = ?, last_updated_ts = ?
+                            WHERE work_id = ?
+                        """, (float(upd_progress), 1 if dec_need else 0, datetime.now().isoformat(), selected_work))
+                        st.success("บันทึก update เรียบร้อย")
+                        st.rerun()
+
+            with u2:
+                st.markdown("#### แนบหลักฐาน (Evidence)")
+                upfile = st.file_uploader("อัปโหลดไฟล์หลักฐาน", type=None, key="evidence_uploader")
+                ev_note = st.text_input("หมายเหตุหลักฐาน", placeholder="เช่น รายงาน, รูปถ่าย, บันทึกการประชุม")
+                if upfile is not None and st.button("แนบหลักฐาน"):
+                    today = date.today()
+                    ensure_dim_date(today, today)
+                    safe_name = f"{selected_work}_{int(datetime.now().timestamp())}_{upfile.name}"
+                    stored_path = UPLOAD_DIR / safe_name
+                    with open(stored_path, "wb") as f:
+                        f.write(upfile.getbuffer())
+                    exec_sql("""
+                        INSERT INTO fact_work_evidence(evidence_id, work_id, date_id, file_name, stored_path, note, uploaded_ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        uid("EVI"), selected_work, to_date_id(today), upfile.name, str(stored_path), ev_note, datetime.now().isoformat()
+                    ))
+                    st.success("แนบหลักฐานเรียบร้อย")
+                    st.rerun()
+
+                st.markdown("#### หลักฐานที่แนบแล้ว")
+                ev = read_df(f"SELECT * FROM fact_work_evidence WHERE work_id = '{selected_work}' ORDER BY uploaded_ts DESC")
+                if ev.empty:
+                    st.info("ยังไม่มีหลักฐาน")
+                else:
+                    for _, r in ev.iterrows():
+                        cols = st.columns([3,2,2])
+                        cols[0].write(f"📎 {r['file_name']}")
+                        cols[1].write(r.get("note",""))
+                        path = r["stored_path"]
+                        if os.path.exists(path):
+                            with open(path, "rb") as f:
+                                cols[2].download_button("Download", data=f.read(), file_name=r["file_name"], key=f"dl_{r['evidence_id']}")
+                        else:
+                            cols[2].write("ไฟล์ไม่พบ (อาจถูกรีสตาร์ทบน cloud)")
+
+            st.markdown("#### ประวัติ Update")
+            upd = read_df(f"SELECT * FROM fact_work_update WHERE work_id = '{selected_work}' ORDER BY created_ts DESC")
+            if upd.empty:
+                st.info("ยังไม่มี update")
+            else:
+                st.dataframe(upd, use_container_width=True, hide_index=True)
+
+# -------------------------
 # Page: Data Import
-# =========================
+# -------------------------
 elif page == "Data Import":
     st.markdown("## ⬆️ Data Import (CSV → Replace Table)")
     st.caption("MVP: Import จะ **replace ทั้งตาราง** เพื่อความง่ายในการทดสอบ/เดโม")
@@ -561,32 +720,30 @@ elif page == "Data Import":
         df = pd.read_csv(up)
         st.markdown("### Preview")
         st.dataframe(df.head(50), use_container_width=True)
-        missing = [c for c in TABLE_COLUMNS[table] if c not in df.columns]
-        extra = [c for c in df.columns if c not in TABLE_COLUMNS[table]]
 
+        missing = [c for c in TABLE_COLUMNS[table] if c not in df.columns]
         if missing:
             st.error(f"CSV ขาดคอลัมน์: {missing}")
-        if extra:
-            st.warning(f"CSV มีคอลัมน์เกิน (ไม่เป็นไรแต่จะเก็บไปด้วย): {extra}")
 
         if st.button("Import (Replace Table)"):
             replace_table(table, df)
             st.success(f"Imported -> {table}")
             st.rerun()
 
-# =========================
+# -------------------------
 # Page: Schema / Templates
-# =========================
+# -------------------------
 else:
     st.markdown("## 🧾 Schema / Templates")
-    st.write("ตารางทั้งหมดที่ใช้ใน MVP นี้:")
+    st.write("ตารางทั้งหมดที่ใช้ใน MVP+ นี้:")
     for t, cols in TABLE_COLUMNS.items():
         with st.expander(t):
             st.code(", ".join(cols))
 
-    st.markdown("### Quick Start (Streamlit Cloud)")
+    st.markdown("### แนวทางใช้งานจริงแบบแผนกกรอกงาน")
     st.markdown("""
-1) สร้าง GitHub repo แล้วใส่ไฟล์ `app.py` และ `requirements.txt`\n
-2) ไปที่ Streamlit Cloud → New app → เลือก repo/branch → main file = `app.py`\n
-3) เปิดแอป → กด **Seed Demo Data** หรือ Import CSV เพื่อใช้ข้อมูลจริง\n
+- ให้แต่ละแผนกใช้หน้า **Department Workspace** เพื่อบันทึก *งานรับผิดชอบ* (work items)\n
+- ทุกงานควรมี: เจ้าภาพ, กำหนดเสร็จ, สถานะ, % ความคืบหน้า, ความเสี่ยง, และติ๊ก *ต้องการการตัดสินใจ* เมื่อจำเป็น\n
+- แนบหลักฐาน/เอกสารประกอบไว้ที่งานนั้น เพื่อให้ตรวจสอบย้อนหลังได้\n
 """)
+
